@@ -12,10 +12,20 @@
         </processorPath>
         <module name="fr-backend-msc" />
       </profile>
+      <profile name="Annotation profile for FR-Backend" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <processorPath useClasspath="false">
+          <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/unknown/lombok-unknown.jar" />
+        </processorPath>
+        <module name="FR-Backend" />
+      </profile>
     </annotationProcessing>
   </component>
   <component name="JavacSettings">
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="FR-Backend" options="-parameters" />
       <module name="fr-backend-msc" options="-parameters" />
     </option>
   </component>
