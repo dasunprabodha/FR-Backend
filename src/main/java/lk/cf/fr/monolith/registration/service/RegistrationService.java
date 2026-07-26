@@ -6,6 +6,7 @@ import lk.cf.fr.monolith.document.DocumentProcessingService;
 import lk.cf.fr.monolith.document.NicValidationOutcome;
 import lk.cf.fr.monolith.liveness.LivenessService;
 import lk.cf.fr.monolith.recognition.FaceRecognitionService;
+import lk.cf.fr.monolith.storage.FaceImageStorageService;
 import lk.cf.fr.monolith.registry.DeviceResolutionService;
 import lk.cf.fr.monolith.registry.entity.DeviceRecord;
 import lk.cf.fr.monolith.registration.dto.RegistrationRequest;
@@ -55,15 +56,13 @@ public class RegistrationService {
     private final DocumentProcessingService documentProcessingService;
     private final FaceRecognitionService faceRecognitionService;
     private final LivenessService livenessService;
+    private final FaceImageStorageService faceImageStorageService;
 
     @Value("${registration.device-image-timeout-seconds:120}")
     private long captureTimeoutSeconds;
 
     @Value("${registration.liveness-wait-timeout-seconds:60}")
     private long livenessWaitTimeoutSeconds;
-
-    @Value("${registration.nic-max-retries:1}")
-    private int nicMaxRetries;
 
     private final Map<String, RegistrationSession> activeSessions = new ConcurrentHashMap<>();
 
@@ -137,7 +136,11 @@ public class RegistrationService {
         CompletableFuture<Void> livenessCompleteFuture = deviceCommunicationService.awaitLivenessCompletion(session.getReferenceId());
 
         session.setState(RegistrationState.DEVICE_REQUESTED);
-        byte[] nicImage = captureNicWithRetry(session, request);
+        session.setState(RegistrationState.DOCUMENT_CAPTURE);
+        byte[] nicImage = capture(session, "nicImage", request.getPrefLang());
+        session.setState(RegistrationState.DOCUMENT_VALIDATED);
+
+        validateScannedNic(session, request, scannedNicBytes);
 
         session.setState(RegistrationState.FACE_CAPTURE);
         byte[] faceImage = capture(session, "faceImage", request.getPrefLang());
@@ -173,8 +176,7 @@ public class RegistrationService {
                 session.getValidNicStatus(), registrationStatus);
 
         if (allPassed) {
-            log.info("[MOCK] Interim S3 persistence skipped for referenceId={} - no external S3/file-storage "
-                    + "service configured for this MVP.", session.getReferenceId());
+            faceImageStorageService.saveEnrolledFace(session.getNic(), faceImage);
         }
 
         session.setState(RegistrationState.COMPLETED);
@@ -214,30 +216,22 @@ public class RegistrationService {
     }
 
     /**
-     * Mirrors Device_Management.ListenerService.handleRegistration's bounded NIC-retry loop:
-     * capture the NIC photo, run OCR, and if invalid/unknown, recapture up to
-     * {@code registration.nic-max-retries} more times before giving up.
+     * OCR/document validation now runs only against the optionally-uploaded {@code scannedNIC}
+     * file, not the live device-captured {@code nicImage} - the device capture is used solely for
+     * face comparisons 1/2. No-op (leaves {@code validNicStatus} as {@code NOT_PROVIDED}) when no
+     * file was uploaded, since scannedNIC is optional.
      */
-    private byte[] captureNicWithRetry(RegistrationSession session, RegistrationRequest request) {
-        int attempt = 0;
-        while (true) {
-            session.setState(RegistrationState.DOCUMENT_CAPTURE);
-            byte[] nicImage = capture(session, "nicImage", request.getPrefLang());
-            NicValidationOutcome outcome = documentProcessingService.validateNic(nicImage, request.getMockNicValid());
-            session.setValidNicStatus(outcome.name());
-            attempt++;
-
-            if (outcome == NicValidationOutcome.VALID) {
-                session.setState(RegistrationState.DOCUMENT_VALIDATED);
-                return nicImage;
-            }
-            if (attempt > nicMaxRetries) {
-                throw new RegistrationException(RegistrationState.DOCUMENT_INVALID,
-                        "NIC/document validation failed after " + attempt + " attempt(s): " + outcome,
-                        "Could not validate a National Identity Card/Document. Please retry with a clearer photo.");
-            }
-            log.warn("[Registration] NIC document invalid ({}), retrying capture (attempt {}/{}) referenceId={}",
-                    outcome, attempt, nicMaxRetries + 1, session.getReferenceId());
+    private void validateScannedNic(RegistrationSession session, RegistrationRequest request, byte[] scannedNicBytes) {
+        if (scannedNicBytes == null) {
+            session.setValidNicStatus("NOT_PROVIDED");
+            return;
+        }
+        NicValidationOutcome outcome = documentProcessingService.validateNic(scannedNicBytes, request.getMockNicValid());
+        session.setValidNicStatus(outcome.name());
+        if (outcome != NicValidationOutcome.VALID) {
+            throw new RegistrationException(RegistrationState.DOCUMENT_INVALID,
+                    "Scanned NIC/document validation failed: " + outcome,
+                    "Could not validate the uploaded National Identity Card/Document. Please upload a clearer scan.");
         }
     }
 
