@@ -141,6 +141,13 @@ public class RegistrationService {
         session.setState(RegistrationState.DOCUMENT_VALIDATED);
 
         validateScannedNic(session, request, scannedNicBytes);
+        // NicWaitingActivity on the device blocks on exactly this message shape (see
+        // DeviceCommunicationService#notifyNicCheckResult) - without it the device sits until its
+        // own 4-minute client-side timeout even though the backend has already moved on. Fired
+        // here (VALID/NOT_PROVIDED both count as "valid" from the device's perspective) since
+        // validateScannedNic() only returns normally in those two cases; the DOCUMENT_INVALID
+        // case is notified from within validateScannedNic() itself before it throws.
+        deviceCommunicationService.notifyNicCheckResult(session.getDeviceId(), session.getReferenceId(), true);
 
         session.setState(RegistrationState.FACE_CAPTURE);
         byte[] faceImage = capture(session, "faceImage", request.getPrefLang());
@@ -229,6 +236,7 @@ public class RegistrationService {
         NicValidationOutcome outcome = documentProcessingService.validateNic(scannedNicBytes, request.getMockNicValid());
         session.setValidNicStatus(outcome.name());
         if (outcome != NicValidationOutcome.VALID) {
+            deviceCommunicationService.notifyNicCheckResult(session.getDeviceId(), session.getReferenceId(), false);
             throw new RegistrationException(RegistrationState.DOCUMENT_INVALID,
                     "Scanned NIC/document validation failed: " + outcome,
                     "Could not validate the uploaded National Identity Card/Document. Please upload a clearer scan.");
