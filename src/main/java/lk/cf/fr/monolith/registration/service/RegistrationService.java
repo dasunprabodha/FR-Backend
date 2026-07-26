@@ -184,6 +184,8 @@ public class RegistrationService {
 
         if (allPassed) {
             faceImageStorageService.saveEnrolledFace(session.getNic(), faceImage);
+            faceImageStorageService.saveFaceWithNic(session.getNic(), selfImage);
+            faceImageStorageService.saveNicImage(session.getNic(), nicImage);
         }
 
         session.setState(RegistrationState.COMPLETED);

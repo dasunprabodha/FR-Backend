@@ -31,15 +31,29 @@ public class S3FaceImageStorageService implements FaceImageStorageService {
 
     @Override
     public void saveEnrolledFace(String nic, byte[] faceImageBytes) {
-        String key = "FaceOnly/" + nic + ".jpg";
+        upload("FaceOnly", nic, faceImageBytes);
+    }
+
+    @Override
+    public void saveFaceWithNic(String nic, byte[] selfImageBytes) {
+        upload("FaceWithNIC", nic, selfImageBytes);
+    }
+
+    @Override
+    public void saveNicImage(String nic, byte[] nicImageBytes) {
+        upload("NICImage", nic, nicImageBytes);
+    }
+
+    private void upload(String folder, String nic, byte[] imageBytes) {
+        String key = folder + "/" + nic + ".jpg";
         log.info("[S3-UPLOAD] Attempting upload nic={} bucket={} key={} sizeBytes={}",
-                nic, bucket, key, faceImageBytes.length);
+                nic, bucket, key, imageBytes.length);
         try {
             PutObjectResponse response = s3Client.putObject(PutObjectRequest.builder()
                     .bucket(bucket)
                     .key(key)
                     .contentType("image/jpeg")
-                    .build(), RequestBody.fromBytes(faceImageBytes));
+                    .build(), RequestBody.fromBytes(imageBytes));
             log.info("[S3-UPLOAD] SUCCESS nic={} bucket={} key={} eTag={} versionId={}",
                     nic, bucket, key, response.eTag(), response.versionId());
         } catch (Exception e) {

@@ -15,8 +15,22 @@ public class MockFaceImageStorageService implements FaceImageStorageService {
 
     @Override
     public void saveEnrolledFace(String nic, byte[] faceImageBytes) {
-        log.info("[S3-UPLOAD] SKIPPED (mock mode, aws.enabled=false) nic={} sizeBytes={} - "
+        skip("FaceOnly", nic, faceImageBytes);
+    }
+
+    @Override
+    public void saveFaceWithNic(String nic, byte[] selfImageBytes) {
+        skip("FaceWithNIC", nic, selfImageBytes);
+    }
+
+    @Override
+    public void saveNicImage(String nic, byte[] nicImageBytes) {
+        skip("NICImage", nic, nicImageBytes);
+    }
+
+    private void skip(String folder, String nic, byte[] imageBytes) {
+        log.info("[S3-UPLOAD] SKIPPED (mock mode, aws.enabled=false) folder={} nic={} sizeBytes={} - "
                 + "no real upload happened, no external S3/file-storage service configured for this MVP.",
-                nic, faceImageBytes.length);
+                folder, nic, imageBytes.length);
     }
 }
