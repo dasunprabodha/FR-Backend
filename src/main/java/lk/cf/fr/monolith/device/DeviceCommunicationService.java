@@ -101,6 +101,34 @@ public class DeviceCommunicationService {
     }
 
     /**
+     * Best-effort notification so the device's NicWaitingActivity (which blocks on exactly this
+     * message shape) learns the outcome of the server-side NIC/document OCR check, instead of
+     * sitting until its own 4-minute client-side timeout. The device has no other way to learn
+     * this - unlike the legacy Kafka pipeline, this monolith's registration result is otherwise
+     * only returned via the synchronous HTTP response to whichever caller invoked
+     * POST /api/facial-auth, not pushed back to the capture device itself.
+     */
+    public void notifyNicCheckResult(String deviceId, String referenceId, boolean valid) {
+        if (!sessionRegistry.isOnline(deviceId, CLIENT_TYPE)) {
+            log.warn("[Device] Could not notify nic-check-result, device {} offline", deviceId);
+            return;
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("status", valid ? "valid" : "invalid");
+        data.put("referenceId", referenceId);
+
+        Map<String, Object> message = new LinkedHashMap<>();
+        message.put("type", "nic-check-result");
+        message.put("data", data);
+
+        try {
+            sessionRegistry.send(deviceId, CLIENT_TYPE, objectMapper.writeValueAsString(message), referenceId);
+        } catch (Exception e) {
+            log.warn("[Device] Failed to send nic-check-result to {}: {}", deviceId, e.toString());
+        }
+    }
+
+    /**
      * Returns a future that resolves once the device reports its on-device liveness challenge
      * has finished. Safe to call before or after the device's message actually arrives - whichever
      * happens first creates the shared future (see {@link #onLivenessComplete}).

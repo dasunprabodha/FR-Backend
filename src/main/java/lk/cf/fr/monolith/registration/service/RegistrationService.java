@@ -229,9 +229,11 @@ public class RegistrationService {
 
             if (outcome == NicValidationOutcome.VALID) {
                 session.setState(RegistrationState.DOCUMENT_VALIDATED);
+                deviceCommunicationService.notifyNicCheckResult(session.getDeviceId(), session.getReferenceId(), true);
                 return nicImage;
             }
             if (attempt > nicMaxRetries) {
+                deviceCommunicationService.notifyNicCheckResult(session.getDeviceId(), session.getReferenceId(), false);
                 throw new RegistrationException(RegistrationState.DOCUMENT_INVALID,
                         "NIC/document validation failed after " + attempt + " attempt(s): " + outcome,
                         "Could not validate a National Identity Card/Document. Please retry with a clearer photo.");
