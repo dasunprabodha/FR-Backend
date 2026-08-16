@@ -58,18 +58,20 @@ public class RegistrationResultService {
         return registrationRecordRepository.save(record);
     }
 
+    /** Records the local disk paths written by {@code LocalPendingImageStorageService} at capture time - see the Registration Approval Workflow. */
     @Transactional
-    public void persistImages(String referenceId, byte[] nicImage, byte[] faceImage, byte[] selfImage) {
+    public void persistImages(String referenceId, String nicImagePath, String faceImagePath, String selfImagePath) {
         RegistrationRecord record = getOrThrow(referenceId);
-        record.setNicImageRef(placeholderRef(referenceId, "nicImage", nicImage.length));
-        record.setFaceImageRef(placeholderRef(referenceId, "faceImage", faceImage.length));
-        record.setSelfImageRef(placeholderRef(referenceId, "selfImage", selfImage.length));
+        record.setNicImageRef(nicImagePath);
+        record.setFaceImageRef(faceImagePath);
+        record.setSelfImageRef(selfImagePath);
         registrationRecordRepository.save(record);
     }
 
     @Transactional
     public void persistResult(String referenceId, ComparisonResult cmp1, ComparisonResult cmp2, ComparisonResult cmp3,
-                               ComparisonResult cmp4, LivenessOutcome liveness, String validNicStatus, String registrationStatus) {
+                               ComparisonResult cmp4, LivenessOutcome liveness, String validNicStatus, String registrationStatus,
+                               Double similarityThreshold, Double livenessThreshold, String failureReason) {
         RegistrationRecord record = getOrThrow(referenceId);
         record.setMatch(cmp1.match());
         record.setSimilarity(cmp1.similarity());
@@ -85,6 +87,9 @@ public class RegistrationResultService {
         record.setLivenessScore(liveness.confidence());
         record.setValidNicStatus(validNicStatus);
         record.setStatus(registrationStatus);
+        record.setSimilarityThreshold(similarityThreshold);
+        record.setLivenessThreshold(livenessThreshold);
+        record.setFailureReason(failureReason);
         record.setResTime(LocalDateTime.now());
         registrationRecordRepository.save(record);
         log.info("[Registration] Persisted final result referenceId={} status={}", referenceId, registrationStatus);
@@ -96,15 +101,15 @@ public class RegistrationResultService {
         registrationRecordRepository.findByReferenceId(referenceId).ifPresent(registrationRecordRepository::delete);
     }
 
+    /** Used by RegistrationService to hand the just-persisted record to RegistrationFinalizationService after an auto-pass. */
+    public RegistrationRecord getByReferenceId(String referenceId) {
+        return getOrThrow(referenceId);
+    }
+
     private RegistrationRecord getOrThrow(String referenceId) {
         return registrationRecordRepository.findByReferenceId(referenceId)
                 .orElseThrow(() -> new RegistrationException(RegistrationState.PROCESSING_ERROR,
                         "No registration_record row found for referenceId=" + referenceId,
                         "An unexpected error occurred during registration."));
-    }
-
-    /** No external file-storage service is configured for this MVP - see "Temporary assumptions" in REGISTRATION_IMPLEMENTATION_PROGRESS.md. */
-    private static String placeholderRef(String referenceId, String tag, int byteLength) {
-        return "captured:" + referenceId + ":" + tag + ":" + byteLength + "-bytes (mock local storage, no external file-storage service configured)";
     }
 }

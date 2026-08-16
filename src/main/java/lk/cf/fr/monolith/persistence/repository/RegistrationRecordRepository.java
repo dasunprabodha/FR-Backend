@@ -17,4 +17,8 @@ public interface RegistrationRecordRepository extends JpaRepository<Registration
     Optional<RegistrationRecord> findByReferenceId(String referenceId);
 
     List<RegistrationRecord> findByNicOrderByReqTimeDesc(String nic);
+
+    List<RegistrationRecord> findByStatusOrderByReqTimeDesc(String status);
+
+    List<RegistrationRecord> findByStatusInOrderByActionDateDesc(List<String> statuses);
 }

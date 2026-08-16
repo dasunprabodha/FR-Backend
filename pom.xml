@@ -79,6 +79,24 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- ONNX Runtime + OpenCV (JavaCV): local ID-card region detector (CardDetectorService),
+             ported from the legacy cf-fr-server system - previously deliberately excluded from this
+             MVP for exactly this dependency weight (see REGISTRATION_IMPLEMENTATION_PROGRESS.md
+             Blocker #1); reintroduced now that a trained card_model_2.onnx model is available and
+             OCR/comparison accuracy in practice needs it. javacv-platform bundles native libraries
+             for all supported OSes/architectures so the build works unmodified regardless of dev/
+             deploy platform, at the cost of a much larger dependency download. -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>1.26.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bytedeco</groupId>
+            <artifactId>javacv-platform</artifactId>
+            <version>1.5.9</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

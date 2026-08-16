@@ -11,10 +11,14 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 /**
  * Real S3 upload of the enrolled reference face - active only when {@code aws.enabled=true}; see
- * {@link MockFaceImageStorageService} for the MVP default. Failures are caught and logged rather
- * than propagated, matching {@code RekognitionDocumentProcessingService}'s own handling of AWS
- * errors: an interim-storage hiccup shouldn't turn an otherwise-successful face/liveness match
- * into a failed registration response.
+ * {@link MockFaceImageStorageService} for the MVP default. Failures are propagated as
+ * {@link ImageStorageException} rather than swallowed, so callers can react: the manual-approval
+ * path ({@code RegistrationApprovalService.approve} via {@code RegistrationFinalizationService})
+ * needs to know a failure happened so it can leave the record PENDING_APPROVAL instead of marking
+ * it APPROVED. The automatic-success path ({@code RegistrationService}) is the one that chooses
+ * to catch-and-log instead of failing the registration response, preserving the original
+ * "an interim-storage hiccup shouldn't turn an otherwise-successful match into a failed
+ * registration" behavior at the call site instead of here.
  */
 @Service
 @Slf4j
@@ -59,6 +63,7 @@ public class S3FaceImageStorageService implements FaceImageStorageService {
         } catch (Exception e) {
             log.error("[S3-UPLOAD] FAILED nic={} bucket={} key={} reason={}",
                     nic, bucket, key, e.getMessage(), e);
+            throw new ImageStorageException("S3 upload failed for nic=" + nic + " key=" + key, e);
         }
     }
 }

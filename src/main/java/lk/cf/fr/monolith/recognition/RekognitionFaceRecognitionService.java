@@ -1,6 +1,7 @@
 package lk.cf.fr.monolith.recognition;
 
 import lk.cf.fr.monolith.verification.model.ComparisonResult;
+import lk.cf.fr.monolith.verification.model.FaceBoundingBox;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -57,12 +58,26 @@ public class RekognitionFaceRecognitionService implements FaceRecognitionService
                 .similarityThreshold(similarityCutoff)
                 .build());
 
+        FaceBoundingBox sourceFaceBox = response.sourceImageFace() != null
+                ? toFaceBoundingBox(response.sourceImageFace().boundingBox())
+                : null;
+
         List<CompareFacesMatch> matches = response.faceMatches();
         if (matches == null || matches.isEmpty()) {
-            return new ComparisonResult(false, 0.0, response.toString());
+            return new ComparisonResult(false, 0.0, response.toString(), sourceFaceBox, null);
         }
-        float similarity = matches.get(0).similarity();
+        CompareFacesMatch bestMatch = matches.get(0);
+        float similarity = bestMatch.similarity();
         boolean isMatch = similarity >= similarityCutoff;
-        return new ComparisonResult(isMatch, similarity, response.toString());
+        FaceBoundingBox targetFaceBox = bestMatch.face() != null ? toFaceBoundingBox(bestMatch.face().boundingBox()) : null;
+        return new ComparisonResult(isMatch, similarity, response.toString(), sourceFaceBox, targetFaceBox);
+    }
+
+    /** Rekognition's BoundingBox fields are boxed Floats and can be null even when the box itself is present. */
+    private static FaceBoundingBox toFaceBoundingBox(BoundingBox box) {
+        if (box == null || box.left() == null || box.top() == null || box.width() == null || box.height() == null) {
+            return null;
+        }
+        return new FaceBoundingBox(box.left(), box.top(), box.width(), box.height());
     }
 }

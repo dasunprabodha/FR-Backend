@@ -1,12 +1,15 @@
 package lk.cf.fr.monolith.registration.service;
 
+import lk.cf.fr.monolith.card.CardDetectorService;
 import lk.cf.fr.monolith.device.DeviceCommunicationException;
 import lk.cf.fr.monolith.device.DeviceCommunicationService;
 import lk.cf.fr.monolith.document.DocumentProcessingService;
 import lk.cf.fr.monolith.document.NicValidationOutcome;
 import lk.cf.fr.monolith.liveness.LivenessService;
 import lk.cf.fr.monolith.recognition.FaceRecognitionService;
-import lk.cf.fr.monolith.storage.FaceImageStorageService;
+import lk.cf.fr.monolith.storage.ImageStorageException;
+import lk.cf.fr.monolith.storage.LocalPendingImageStorageService;
+import lk.cf.fr.monolith.registration.model.RegistrationApprovalStatus;
 import lk.cf.fr.monolith.registry.DeviceResolutionService;
 import lk.cf.fr.monolith.registry.entity.DeviceRecord;
 import lk.cf.fr.monolith.registration.dto.RegistrationRequest;
@@ -56,13 +59,22 @@ public class RegistrationService {
     private final DocumentProcessingService documentProcessingService;
     private final FaceRecognitionService faceRecognitionService;
     private final LivenessService livenessService;
-    private final FaceImageStorageService faceImageStorageService;
+    private final LocalPendingImageStorageService localPendingImageStorageService;
+    private final RegistrationFinalizationService registrationFinalizationService;
+    private final ComparisonImageDumpService comparisonImageDumpService;
+    private final CardDetectorService cardDetectorService;
 
     @Value("${registration.device-image-timeout-seconds:120}")
     private long captureTimeoutSeconds;
 
     @Value("${registration.liveness-wait-timeout-seconds:60}")
     private long livenessWaitTimeoutSeconds;
+
+    @Value("${verification.similarity-threshold:80}")
+    private double similarityThreshold;
+
+    @Value("${verification.liveness-confidence-threshold:65}")
+    private double livenessConfidenceThreshold;
 
     private final Map<String, RegistrationSession> activeSessions = new ConcurrentHashMap<>();
 
@@ -96,6 +108,7 @@ public class RegistrationService {
                     session.setState(e.getState());
                     session.setErrorMessage(e.getReason());
                     registrationResultService.removeIncompleteRecord(referenceId);
+                    localPendingImageStorageService.deleteAll(referenceId);
                     e.setResponse(buildErrorResponse(session, e.getReason()));
                 }
             }
@@ -107,6 +120,7 @@ public class RegistrationService {
                 session.setState(RegistrationState.PROCESSING_ERROR);
                 session.setErrorMessage(e.getMessage());
                 registrationResultService.removeIncompleteRecord(referenceId);
+                localPendingImageStorageService.deleteAll(referenceId);
                 minimal = buildErrorResponse(session, "An unexpected error occurred during registration.");
             } else {
                 minimal = RegistrationResponse.builder()
@@ -153,19 +167,55 @@ public class RegistrationService {
         byte[] faceImage = capture(session, "faceImage", request.getPrefLang());
         byte[] selfImage = capture(session, "selfImage", request.getPrefLang());
 
-        registrationResultService.persistImages(session.getReferenceId(), nicImage, faceImage, selfImage);
+        // Written to local disk (not just referenced) so a PENDING_APPROVAL record's images survive
+        // past this request for the Approval Dashboard to review - see LocalPendingImageStorageService.
+        String nicImagePath = localPendingImageStorageService.save(session.getReferenceId(), "nicImage", nicImage);
+        String faceImagePath = localPendingImageStorageService.save(session.getReferenceId(), "faceImage", faceImage);
+        String selfImagePath = localPendingImageStorageService.save(session.getReferenceId(), "selfImage", selfImage);
+        registrationResultService.persistImages(session.getReferenceId(), nicImagePath, faceImagePath, selfImagePath);
 
         session.setState(RegistrationState.LIVENESS_PROCESSING);
         awaitLivenessSignal(livenessCompleteFuture);
         LivenessOutcome liveness = livenessService.getResults(session.getLivenessSessionId(), request.getMockLivenessPassed());
 
         session.setState(RegistrationState.FACE_PROCESSING);
-        ComparisonResult cmp1 = faceRecognitionService.compareFacesInMemory(nicImage, faceImage, request.getMockSimilarity());
-        ComparisonResult cmp2 = faceRecognitionService.compareFacesInMemory(nicImage, selfImage, request.getMockSimilarity());
+
+        // Crop the physical card region out of nicImage/selfImage before comparing - fixes a real
+        // failure mode where the device-captured nicImage frames the user's live face more
+        // prominently than the card (user holding the NIC up close to the camera), causing
+        // Rekognition to compare against the live face instead of the small printed photo on the
+        // card. cmp2 ("Device NIC vs Self NIC") is specifically a card-vs-card comparison, so both
+        // sides are cropped to their NIC region; cmp3 (face vs self face) intentionally keeps using
+        // the full uncropped selfImage since it needs the live face there, not the card. Falls back
+        // to the original uncropped bytes whenever no card is detected, so a missed detection never
+        // blocks registration - it just reverts to today's (pre-crop) behavior for that attempt.
+        byte[] nicCardCrop = cardDetectorService.cropCard(nicImage, "DeviceNIC", session.getReferenceId());
+        byte[] nicForComparison = nicCardCrop != null ? nicCardCrop : nicImage;
+        log.info("[Registration][Card-Crop] referenceId={} DeviceNIC crop {} ({} bytes -> {} bytes)",
+                session.getReferenceId(), nicCardCrop != null ? "succeeded" : "FAILED (falling back to full image)",
+                nicImage.length, nicForComparison.length);
+
+        byte[] selfNicCardCrop = cardDetectorService.cropCard(selfImage, "SelfNIC", session.getReferenceId());
+        byte[] selfNicForComparison = selfNicCardCrop != null ? selfNicCardCrop : selfImage;
+        log.info("[Registration][Card-Crop] referenceId={} SelfNIC crop {} ({} bytes -> {} bytes)",
+                session.getReferenceId(), selfNicCardCrop != null ? "succeeded" : "FAILED (falling back to full image)",
+                selfImage.length, selfNicForComparison.length);
+
+        ComparisonResult cmp1 = faceRecognitionService.compareFacesInMemory(nicForComparison, faceImage, request.getMockSimilarity());
+        comparisonImageDumpService.dump(session.getReferenceId(), "cmp1-deviceNicVsFace", nicForComparison, faceImage, cmp1);
+
+        ComparisonResult cmp2 = faceRecognitionService.compareFacesInMemory(nicForComparison, selfNicForComparison, request.getMockSimilarity());
+        comparisonImageDumpService.dump(session.getReferenceId(), "cmp2-deviceNicVsSelfNic", nicForComparison, selfNicForComparison, cmp2);
+
         ComparisonResult cmp3 = faceRecognitionService.compareFacesInMemory(faceImage, selfImage, request.getMockSimilarity());
+        comparisonImageDumpService.dump(session.getReferenceId(), "cmp3-faceVsSelfFace", faceImage, selfImage, cmp3);
+
         ComparisonResult cmp4 = scannedNicBytes != null
                 ? faceRecognitionService.compareFacesInMemory(scannedNicBytes, faceImage, request.getMockSimilarity())
                 : null;
+        if (cmp4 != null) {
+            comparisonImageDumpService.dump(session.getReferenceId(), "cmp4-scannedNicVsFace", scannedNicBytes, faceImage, cmp4);
+        }
 
         // Gate mirrors legacy exactly: comparison 1 (device NIC vs face) is informational only and
         // excluded from the pass/fail gate - see REGISTRATION_PATH_MONOLITH_ARCHITECTURE.md §3.4
@@ -173,19 +223,34 @@ public class RegistrationService {
         // comparison 4 is only required in the gate if a scannedNIC file was actually supplied,
         // since legacy's hard requirement of it (throwing when absent) contradicts the same
         // document's own description of scannedNIC as optional - see
-        // REGISTRATION_IMPLEMENTATION_PROGRESS.md "Temporary assumptions".
-        boolean allPassed = cmp2.match() && cmp3.match() && (cmp4 == null || cmp4.match());
-        String registrationStatus = allPassed ? "AWS_APPROVED" : "PENDING";
+        // REGISTRATION_IMPLEMENTATION_PROGRESS.md "Temporary assumptions". Liveness is now also part
+        // of the gate (Registration Approval Workflow): it used to be computed but never checked here.
+        boolean similarityPassed = cmp2.match() && cmp3.match() && (cmp4 == null || cmp4.match());
+        boolean allPassed = similarityPassed && liveness.passed();
+        String registrationStatus = allPassed
+                ? RegistrationApprovalStatus.AWS_APPROVED.name()
+                : RegistrationApprovalStatus.PENDING_APPROVAL.name();
         String overallDecision = allPassed ? "success" : "unsuccess";
+        String failureReason = allPassed ? null : buildFailureReason(similarityPassed, liveness.passed());
 
         session.setState(RegistrationState.REGISTRATION_PROCESSING);
         registrationResultService.persistResult(session.getReferenceId(), cmp1, cmp2, cmp3, cmp4, liveness,
-                session.getValidNicStatus(), registrationStatus);
+                session.getValidNicStatus(), registrationStatus, similarityThreshold, livenessConfidenceThreshold, failureReason);
 
+        boolean pendingApproval = !allPassed;
+        String message;
         if (allPassed) {
-            faceImageStorageService.saveEnrolledFace(session.getNic(), faceImage);
-            faceImageStorageService.saveFaceWithNic(session.getNic(), selfImage);
-            faceImageStorageService.saveNicImage(session.getNic(), nicImage);
+            // S3 hiccups here are logged-and-continued rather than failing the response, preserving
+            // S3FaceImageStorageService's original swallow behavior - see its class doc.
+            try {
+                var record = registrationResultService.getByReferenceId(session.getReferenceId());
+                registrationFinalizationService.finalizeApproved(record, nicImage, faceImage, selfImage);
+            } catch (ImageStorageException e) {
+                log.error("[Registration] Image upload failed after auto-pass referenceId={} - continuing anyway", session.getReferenceId(), e);
+            }
+            message = "Registration completed.";
+        } else {
+            message = "Registration pending manual approval.";
         }
 
         session.setState(RegistrationState.COMPLETED);
@@ -194,6 +259,7 @@ public class RegistrationService {
                 .referenceId(session.getReferenceId())
                 .status(true)
                 .overallSimilarityDecision(overallDecision)
+                .pendingApproval(pendingApproval)
                 .deviceNicVsFaceMatch(cmp1.match())
                 .deviceNicVsFaceSimilarityScore(cmp1.similarity())
                 .deviceNicVsSelfNicMatch(cmp2.match())
@@ -206,8 +272,22 @@ public class RegistrationService {
                 .livenessScore(liveness.confidence())
                 .livenessSessionId(session.getLivenessSessionId())
                 .validNicStatus(session.getValidNicStatus())
-                .message("Registration completed.")
+                .message(message)
                 .build();
+    }
+
+    private String buildFailureReason(boolean similarityPassed, boolean livenessPassed) {
+        StringBuilder reason = new StringBuilder();
+        if (!similarityPassed) {
+            reason.append("LOW_SIMILARITY");
+        }
+        if (!livenessPassed) {
+            if (reason.length() > 0) {
+                reason.append(",");
+            }
+            reason.append("LIVENESS_FAILED");
+        }
+        return reason.toString();
     }
 
     private void validateRequest(RegistrationRequest request) {
@@ -232,12 +312,19 @@ public class RegistrationService {
      */
     private void validateScannedNic(RegistrationSession session, RegistrationRequest request, byte[] scannedNicBytes) {
         if (scannedNicBytes == null) {
+            log.info("[Registration][NIC-Check] referenceId={} nic={} no scannedNIC file uploaded -> NOT_PROVIDED (skipping OCR)",
+                    session.getReferenceId(), session.getNic());
             session.setValidNicStatus("NOT_PROVIDED");
             return;
         }
+        log.info("[Registration][NIC-Check] referenceId={} nic={} scannedNIC uploaded ({} bytes) - running OCR validation",
+                session.getReferenceId(), session.getNic(), scannedNicBytes.length);
         NicValidationOutcome outcome = documentProcessingService.validateNic(scannedNicBytes, request.getMockNicValid());
+        log.info("[Registration][NIC-Check] referenceId={} nic={} OCR outcome={}", session.getReferenceId(), session.getNic(), outcome);
         session.setValidNicStatus(outcome.name());
         if (outcome != NicValidationOutcome.VALID) {
+            log.warn("[Registration][NIC-Check] referenceId={} nic={} rejecting registration - scanned document did not classify as a valid NIC (outcome={})",
+                    session.getReferenceId(), session.getNic(), outcome);
             deviceCommunicationService.notifyNicCheckResult(session.getDeviceId(), session.getReferenceId(), false);
             throw new RegistrationException(RegistrationState.DOCUMENT_INVALID,
                     "Scanned NIC/document validation failed: " + outcome,

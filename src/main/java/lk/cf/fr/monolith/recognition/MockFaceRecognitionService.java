@@ -53,6 +53,8 @@ public class MockFaceRecognitionService implements FaceRecognitionService {
     private ComparisonResult compare(Double similarityOverride) {
         double similarity = similarityOverride != null ? similarityOverride : defaultSimilarity;
         boolean match = similarity >= similarityThreshold;
-        return new ComparisonResult(match, similarity, "{\"mock\":true,\"similarity\":" + similarity + "}");
+        // No real face detection happens in mock mode, so there's no bounding box to crop to -
+        // ComparisonImageDumpService falls back to dumping the full uncropped image in that case.
+        return new ComparisonResult(match, similarity, "{\"mock\":true,\"similarity\":" + similarity + "}", null, null);
     }
 }

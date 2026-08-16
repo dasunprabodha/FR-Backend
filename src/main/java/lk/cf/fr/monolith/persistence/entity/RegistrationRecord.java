@@ -93,6 +93,28 @@ public class RegistrationRecord {
 
     private LocalDateTime resTime;
 
-    /** Set when RegistrationApprovalService.changeStatus is called - a separate, later request. */
+    /** Set when RegistrationApprovalService.changeStatus/approve/reject is called - a separate, later request; doubles as "reviewedDate". */
     private LocalDateTime actionDate;
+
+    // --- Approval workflow fields (Registration Approval Workflow feature) ---
+
+    /** Snapshot of verification.similarity-threshold at the time this attempt ran, for audit even if config changes later. */
+    private Double similarityThreshold;
+
+    /** Snapshot of verification.liveness-confidence-threshold at the time this attempt ran. */
+    private Double livenessThreshold;
+
+    /** Why this attempt landed in PENDING_APPROVAL, e.g. "LOW_SIMILARITY", "LIVENESS_FAILED", or both joined. Null for AWS_APPROVED attempts. */
+    private String failureReason;
+
+    /** Officer who approved/rejected this record. Nullable placeholder until an auth module exists. */
+    private String reviewedBy;
+
+    /** Optional free-text note left by the reviewing officer, mainly used on reject. */
+    @Lob
+    private String remarks;
+
+    /** Guards against re-uploading images to S3 if approve is somehow invoked twice for the same record. */
+    @Column(name = "images_uploaded_to_s3", nullable = false)
+    private boolean imagesUploadedToS3;
 }

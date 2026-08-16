@@ -25,3 +25,7 @@ replay_pid*
 
 # Maven build output
 target/
+
+# Local runtime storage - captured registration images and comparison-analysis crops
+# (LocalPendingImageStorageService / ComparisonImageDumpService), never meant to be committed.
+data/

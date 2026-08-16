@@ -10,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Map;
 
@@ -48,6 +49,19 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException e) {
         return ResponseEntity.badRequest().body(Map.of("status", false, "message", e.getMessage()));
+    }
+
+    /**
+     * Without this, {@code ResponseStatusException} (thrown by {@code RegistrationApprovalService}
+     * for 404/409/502 cases) would fall through to the generic {@code Exception} handler below and
+     * lose its intended status code, since {@code @ExceptionHandler(Exception.class)} is broad
+     * enough to match it first.
+     */
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<Map<String, Object>> handleResponseStatusException(ResponseStatusException e) {
+        String message = e.getReason() != null ? e.getReason() : e.getMessage();
+        log.warn("{} -> HTTP {} : {}", e.getClass().getSimpleName(), e.getStatusCode().value(), message);
+        return ResponseEntity.status(e.getStatusCode()).body(Map.of("status", false, "message", message));
     }
 
     @ExceptionHandler(Exception.class)

@@ -6,27 +6,28 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.time.LocalDateTime;
+
 /**
- * Mirrors the registration-relevant subset of cf-fr-server Api-Gateway.Dto.GatewayResponse - see
- * REGISTRATION_PATH_MONOLITH_ARCHITECTURE.md §16/§19. Field names are kept unchanged so the
- * existing Angular RosterInformationComponent (which reads deviceNicVsFaceMatch,
- * deviceNicVsSelfNicMatch, faceVsSelfFaceMatch, scannedNicVsFaceMatch and their *SimilarityScore
- * counterparts, livenessPassed, livenessScore, validNicStatus, referenceId,
- * overallSimilarityDecision) can consume this response without modification.
+ * Read-model for the Approval Dashboard - covers the pending list, history list, and get-by-id
+ * views (history rows simply have {@code reviewedDate}/{@code reviewedBy}/{@code remarks}
+ * populated). Deliberately a single DTO rather than three near-identical ones, matching how
+ * {@code RegistrationResponse} already covers every registration outcome in one shape.
  */
 @Getter
 @Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class RegistrationResponse {
+public class RegistrationApprovalDto {
 
+    private Long id;
     private String referenceId;
-    private Boolean status;
-    private String overallSimilarityDecision;
-
-    /** True when this attempt failed only on similarity/liveness and was routed to the Approval Dashboard instead of being discarded. */
-    private Boolean pendingApproval;
+    private String nic;
+    private String cifNo;
+    private String userId;
+    private String status;
+    private String failureReason;
 
     /** Comparison 1: device NIC photo vs. live face capture (informational, not part of the pass gate). */
     private Boolean deviceNicVsFaceMatch;
@@ -44,12 +45,20 @@ public class RegistrationResponse {
     private Boolean scannedNicVsFaceMatch;
     private Double scannedNicVsFaceSimilarityScore;
 
+    private Double similarityThreshold;
+
     private Boolean livenessPassed;
     private Double livenessScore;
-    private String livenessSessionId;
+    private Double livenessThreshold;
 
     private String validNicStatus;
 
-    private String message;
-    private String reason;
+    private LocalDateTime reqTime;
+    private LocalDateTime reviewedDate;
+    private String reviewedBy;
+    private String remarks;
+
+    private String nicImageUrl;
+    private String faceImageUrl;
+    private String selfieImageUrl;
 }
