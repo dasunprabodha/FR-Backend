@@ -1,5 +1,6 @@
 package lk.cf.fr.monolith.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -27,6 +28,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * plaintext, which must NOT be carried forward).
  */
 @Configuration
+@Slf4j
 @ConditionalOnProperty(name = "aws.enabled", havingValue = "true")
 public class AwsClientsConfig {
 
@@ -39,16 +41,51 @@ public class AwsClientsConfig {
     @Value("${aws.session-token:}")
     private String sessionToken;
 
+    /**
+     * Resolves credentials and, importantly, says so at startup.
+     *
+     * <p>Without this the application boots perfectly happily with {@code aws.enabled=true} and no
+     * credentials anywhere, then fails on the first Rekognition call - by which point a batch
+     * evaluation has already spent tens of seconds on local detector work and the failure arrives
+     * as a two-thousand-character provider-chain dump. Naming the credential source during startup
+     * turns that into something noticed before any work is wasted.
+     */
     @Bean
     public AwsCredentialsProvider awsCredentialsProvider() {
-        if (accessKey != null && !accessKey.isBlank() && secretKey != null && !secretKey.isBlank()) {
-            if (sessionToken != null && !sessionToken.isBlank()) {
-                return StaticCredentialsProvider.create(
-                        AwsSessionCredentials.create(accessKey, secretKey, sessionToken));
-            }
-            return StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey));
+        boolean hasStatic = accessKey != null && !accessKey.isBlank()
+                && secretKey != null && !secretKey.isBlank();
+
+        if (hasStatic) {
+            boolean temporary = sessionToken != null && !sessionToken.isBlank();
+            log.info("[AWS] Using explicit credentials from configuration (accessKeyId={}…, type={}). "
+                            + "Set these in application-local.yml, never in application.yml.",
+                    accessKey.substring(0, Math.min(4, accessKey.length())),
+                    temporary ? "temporary STS - these expire" : "long-term IAM");
+            return temporary
+                    ? StaticCredentialsProvider.create(
+                            AwsSessionCredentials.create(accessKey, secretKey, sessionToken))
+                    : StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey));
         }
-        return DefaultCredentialsProvider.create();
+
+        log.info("[AWS] No credentials set in configuration - falling back to the SDK default chain "
+                + "(environment variables, ~/.aws/credentials, instance profile).");
+
+        DefaultCredentialsProvider provider = DefaultCredentialsProvider.create();
+        try {
+            provider.resolveCredentials();
+            log.info("[AWS] Default credential chain resolved successfully.");
+        } catch (Exception e) {
+            // Deliberately does not fail startup: the app is still useful without AWS (the mock
+            // services, the approval dashboard, the evidence views over already-stored records).
+            log.warn("[AWS] ******************************************************************");
+            log.warn("[AWS] NO CREDENTIALS AVAILABLE. aws.enabled=true, but neither");
+            log.warn("[AWS] application-local.yml nor the SDK default chain provided any.");
+            log.warn("[AWS] Every Rekognition/S3 call will fail until this is fixed:");
+            log.warn("[AWS]   - paste your keys into ./application-local.yml, or");
+            log.warn("[AWS]   - set aws.enabled=false there to run on the mock services.");
+            log.warn("[AWS] ******************************************************************");
+        }
+        return provider;
     }
 
     @Bean

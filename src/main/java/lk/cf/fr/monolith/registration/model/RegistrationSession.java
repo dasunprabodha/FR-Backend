@@ -1,5 +1,6 @@
 package lk.cf.fr.monolith.registration.model;
 
+import lk.cf.fr.monolith.analysis.RegistrationAnalysisService;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -34,6 +35,14 @@ public class RegistrationSession {
 
     @Setter
     private String validNicStatus;
+
+    /**
+     * Document OCR + identity-binding evidence for this attempt, captured when the scanned NIC is
+     * validated (between the first and second device captures) and read back later when the final
+     * result is persisted. Null until {@code validateScannedNic} has run.
+     */
+    @Setter
+    private RegistrationAnalysisService.DocumentAnalysis documentAnalysis;
 
     @Setter
     private int nicRetryCount;

@@ -15,9 +15,16 @@ package lk.cf.fr.monolith.document;
 public interface DocumentProcessingService {
 
     /**
+     * Runs OCR over the supplied document image and classifies it.
+     *
+     * <p>Returns a {@link NicOcrResult} rather than a bare {@link NicValidationOutcome}: the
+     * classification is unchanged and still available as {@link NicOcrResult#outcome()}, but the
+     * extracted NIC number and per-line OCR confidences now travel with it, so callers can bind
+     * the document to a claimed identity instead of only asking "is this a NIC?".
+     *
      * @param overrideValid MVP-only demo hook: when the mock implementation is active and this is
      *                      non-null, forces the outcome to VALID/INVALID instead of the configured
      *                      default. Ignored by the real (AWS) implementation.
      */
-    NicValidationOutcome validateNic(byte[] imageBytes, Boolean overrideValid);
+    NicOcrResult validateNic(byte[] imageBytes, Boolean overrideValid);
 }

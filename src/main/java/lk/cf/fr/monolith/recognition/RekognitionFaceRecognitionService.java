@@ -51,11 +51,30 @@ public class RekognitionFaceRecognitionService implements FaceRecognitionService
         return compare(source, target);
     }
 
+    /**
+     * The request threshold is pinned to {@code 0}, NOT to {@link #similarityCutoff}, and the
+     * accept/reject decision is applied locally instead.
+     *
+     * <p>This is deliberate and load-bearing. Rekognition uses {@code similarityThreshold} as a
+     * server-side <em>filter</em>: any compared face scoring below it is moved into
+     * {@code unmatchedFaces} and never appears in {@code faceMatches}. Passing the 80-point cutoff
+     * therefore meant every sub-threshold comparison - every impostor pair, and every borderline
+     * genuine pair - fell into the empty-matches branch below and was recorded as a similarity of
+     * exactly {@code 0.0}. Scores clipped at the decision boundary make FAR/FRR, EER, ROC/DET
+     * curves and any threshold sweep uncomputable, because the entire informative region of the
+     * score distribution has been flattened to zero before it reaches the database.
+     *
+     * <p>Requesting all scores and thresholding here keeps the decision identical (the same
+     * {@code >= similarityCutoff} test, just applied one layer later) while preserving the raw
+     * score. It also sharpens the empty-matches branch: with no server-side filtering, an empty
+     * {@code faceMatches} list now unambiguously means "no comparable face was detected in the
+     * target image", rather than conflating that with "a face was found but scored low".
+     */
     private ComparisonResult compare(Image source, Image target) {
         CompareFacesResponse response = rekognitionClient.compareFaces(CompareFacesRequest.builder()
                 .sourceImage(source)
                 .targetImage(target)
-                .similarityThreshold(similarityCutoff)
+                .similarityThreshold(0f)
                 .build());
 
         FaceBoundingBox sourceFaceBox = response.sourceImageFace() != null
@@ -64,13 +83,22 @@ public class RekognitionFaceRecognitionService implements FaceRecognitionService
 
         List<CompareFacesMatch> matches = response.faceMatches();
         if (matches == null || matches.isEmpty()) {
-            return new ComparisonResult(false, 0.0, response.toString(), sourceFaceBox, null);
+            // No face detected in the target at all - genuinely no score to report. Reported as a
+            // null similarity rather than 0.0 so it lands as a missing value in the score
+            // distribution instead of a spurious zero at the bottom of it.
+            log.info("[CompareFaces] No comparable face detected in the target image -> no similarity measurement");
+            return new ComparisonResult(false, null, response.toString(), sourceFaceBox, null);
         }
+        // With no server-side filter, faceMatches carries every detected target face ordered by
+        // similarity, so the head is still the best match.
         CompareFacesMatch bestMatch = matches.get(0);
         float similarity = bestMatch.similarity();
         boolean isMatch = similarity >= similarityCutoff;
         FaceBoundingBox targetFaceBox = bestMatch.face() != null ? toFaceBoundingBox(bestMatch.face().boundingBox()) : null;
-        return new ComparisonResult(isMatch, similarity, response.toString(), sourceFaceBox, targetFaceBox);
+        log.info("[CompareFaces] similarity={} cutoff={} -> match={} ({} candidate face(s) compared)",
+                similarity, similarityCutoff, isMatch, matches.size());
+        // Explicit widening: Java will not autobox a float straight to Double.
+        return new ComparisonResult(isMatch, (double) similarity, response.toString(), sourceFaceBox, targetFaceBox);
     }
 
     /** Rekognition's BoundingBox fields are boxed Floats and can be null even when the box itself is present. */

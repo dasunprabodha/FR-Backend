@@ -5,7 +5,6 @@ import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lk.cf.fr.monolith.storage.LocalPendingImageStorageService;
 import lombok.extern.slf4j.Slf4j;
 import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.opencv.opencv_core.Mat;
@@ -18,6 +17,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -44,8 +46,14 @@ import static org.bytedeco.opencv.global.opencv_imgproc.*;
  * aspect-ratio/area sanity checks, the contour-based fallback) is otherwise unchanged:
  * <ul>
  *   <li>The legacy {@code NICValidationUtils.dumpFacesToLocal} call (a class that doesn't exist in
- *   this codebase) is replaced with {@link LocalPendingImageStorageService#save}, which already
- *   exists here for the same "persist a diagnostic/audit image locally" purpose.</li>
+ *   this codebase) is replaced with a direct write into this service's own diagnostics directory
+ *   ({@code fr.carddetector.dump-dir}). It previously wrote through
+ *   {@code LocalPendingImageStorageService}, which resolves under the registration image root -
+ *   and that turned out to be actively harmful: the batch evaluation harness treats that same root
+ *   as a corpus, so every run left behind crop-only folders that the next run then tried to read
+ *   as samples and failed on. Owning a separate directory - symmetric with
+ *   {@code ComparisonImageDumpService} - keeps diagnostics out of any directory that is also an
+ *   input.</li>
  *   <li>Multi-crop dump tags are suffixed with a per-detection index so concurrent crops from the
  *   same capture never collide on the same local file (the legacy dump call tolerated collisions
  *   since it appended its own unique suffix internally; ours does not).</li>
@@ -55,7 +63,7 @@ import static org.bytedeco.opencv.global.opencv_imgproc.*;
 @Service
 public class CardDetectorService {
 
-    private final LocalPendingImageStorageService localPendingImageStorageService;
+    private final Path cropDumpDir;
     private final String modelPath;
 
     private static final int INPUT_SIZE = 640;
@@ -82,10 +90,22 @@ public class CardDetectorService {
     private String inputName;
     private boolean available = false;
 
-    public CardDetectorService(LocalPendingImageStorageService localPendingImageStorageService,
+    public CardDetectorService(@Value("${fr.carddetector.dump-dir:./data/card-crops}") String cropDumpDir,
                                 @Value("${fr.carddetector.path:/models/card_model_2.onnx}") String modelPath) {
-        this.localPendingImageStorageService = localPendingImageStorageService;
+        this.cropDumpDir = Paths.get(cropDumpDir);
         this.modelPath = modelPath;
+    }
+
+    /**
+     * Best-effort diagnostic write. Never affects the caller: a failure here is logged and
+     * swallowed, exactly as the previous storage-service call was.
+     */
+    private String dumpCrop(String referenceId, String tag, byte[] bytes) throws Exception {
+        Path dir = cropDumpDir.resolve(referenceId == null ? "unknown" : referenceId);
+        Files.createDirectories(dir);
+        Path file = dir.resolve(tag + ".jpg");
+        Files.write(file, bytes);
+        return file.toString();
     }
 
     @PostConstruct
@@ -977,7 +997,7 @@ public class CardDetectorService {
             crop.release();
 
             try {
-                String savedPath = localPendingImageStorageService.save(referenceId, tag + "-cardCrop", out);
+                String savedPath = dumpCrop(referenceId, tag + "-cardCrop", out);
                 log.info("cropRegion [{}]: dumped crop, path={}", tag, savedPath);
             } catch (Exception dumpEx) {
                 log.warn("cropRegion [{}]: dump failed: {}", tag, dumpEx.getMessage());
@@ -1090,7 +1110,7 @@ public class CardDetectorService {
                     crop.release();
 
                     try {
-                        localPendingImageStorageService.save(referenceId, tag + "-Contour-cardCrop-" + contourIdx, out);
+                        dumpCrop(referenceId, tag + "-Contour-cardCrop-" + contourIdx, out);
                     } catch (Exception dumpEx) {
                         log.warn("detectAndCropNICContour: dump failed: {}", dumpEx.getMessage());
                     }

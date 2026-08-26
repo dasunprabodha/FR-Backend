@@ -26,6 +26,12 @@ replay_pid*
 # Maven build output
 target/
 
-# Local runtime storage - captured registration images and comparison-analysis crops
-# (LocalPendingImageStorageService / ComparisonImageDumpService), never meant to be committed.
+# Local runtime storage - captured registration images, card-crop and comparison-analysis
+# diagnostics, and evaluation-run outputs. Never meant to be committed.
 data/
+
+# Local credential overrides. application.yml imports this file when present
+# (spring.config.import), so real AWS keys live here and never enter source control.
+# application-local.yml.example is the committed template.
+application-local.yml
+!application-local.yml.example

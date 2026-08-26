@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# LOCAL CREDENTIAL OVERRIDES  --  template, safe to commit (no real values here)
+#
+# HOW TO USE
+#   1. cp application-local.yml.example application-local.yml
+#   2. paste your keys into the copy
+#   3. restart the backend
+#
+# application-local.yml is gitignored and is imported automatically by
+# src/main/resources/application.yml (spring.config.import). No profile flag,
+# no -D arguments: the file is picked up from the working directory if present
+# and silently ignored if not.
+#
+# Anything set here overrides application.yml. You only need the keys you
+# actually want to change - deleting the rest is fine.
+# ---------------------------------------------------------------------------
+
+aws:
+  # Long-term IAM user key (starts with AKIA):
+  #   set access-key + secret-key, leave session-token empty.
+  #
+  # Temporary STS credentials (starts with ASIA):
+  #   set all three. These EXPIRE, typically within a few hours to a day - an
+  #   expired one is what produces
+  #     "The security token included in the request is invalid"
+  #   To refresh:  aws sts get-session-token
+  #
+  # Or leave all three blank to use the AWS CLI's own credentials
+  # (~/.aws/credentials), which avoids copying secrets around entirely.
+
+  access-key: "PASTE_ACCESS_KEY_ID_HERE"
+  secret-key: "PASTE_SECRET_ACCESS_KEY_HERE"
+  session-token: ""
+
+  region: us-east-1
+
+  s3:
+    bucket-name: frs3storage
+
+  # Set false to run entirely on the mock services - no AWS calls, no
+  # credentials needed. Useful for UI work and for exercising the evaluation
+  # harness end to end without spending anything.
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# Handy local-only overrides (uncomment as needed)
+# ---------------------------------------------------------------------------
+
+# registration:
+#   mock:
+#     # Makes the mock OCR claim it read this number, so identity binding can be
+#     # exercised without AWS. Match it to a sample's claimedNic for EXACT_MATCH,
+#     # or differ it for MISMATCH.
+#     nic-number: "199012345678"
+
+# verification:
+#   similarity-threshold: 80
+#   liveness-confidence-threshold: 65

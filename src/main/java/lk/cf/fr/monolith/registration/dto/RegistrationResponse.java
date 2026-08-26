@@ -44,11 +44,44 @@ public class RegistrationResponse {
     private Boolean scannedNicVsFaceMatch;
     private Double scannedNicVsFaceSimilarityScore;
 
+    /**
+     * Comparison 5: uploaded scanned NIC vs. the card physically presented to the camera. Asks
+     * whether the two document channels are even showing the same document — a question nothing
+     * else in the pipeline poses, since OCR and authenticity only inspect the upload while the
+     * gate only inspects the captures. Recorded, not gated.
+     */
+    private Boolean scannedNicVsDeviceNicMatch;
+    private Double scannedNicVsDeviceNicSimilarityScore;
+
+    /**
+     * Derived agreement between the two independent measurements of document-portrait vs. live
+     * face (comparisons 1 and 4): CONSISTENT | MARGINAL | DIVERGENT | UNAVAILABLE, with the
+     * absolute similarity-point gap between the channels.
+     */
+    private String crossChannelStatus;
+    private Double crossChannelDelta;
+
     private Boolean livenessPassed;
     private Double livenessScore;
     private String livenessSessionId;
 
     private String validNicStatus;
+
+    /**
+     * Identity-binding evidence: does the NIC number printed on the presented document actually
+     * match the NIC the applicant claimed? Additive fields - the existing Angular console and the
+     * Android client both ignore unknown JSON properties, so no client change is required.
+     *
+     * <p>{@code nicBindingScore} is 0.0-1.0 and null when {@code nicBindingOutcome} is
+     * {@code UNAVAILABLE} (no document supplied, or no NIC-shaped number read) - absence of
+     * evidence, as distinct from a score of zero meaning contradicting evidence.
+     *
+     * <p>These values are reported but do not yet influence {@code overallSimilarityDecision}.
+     */
+    private String extractedNicNumber;
+    private String nicBindingOutcome;
+    private Double nicBindingScore;
+    private String nicBindingDetail;
 
     private String message;
     private String reason;

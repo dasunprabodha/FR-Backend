@@ -2,6 +2,13 @@ spring:
   application:
     name: fr-backend-msc
 
+  # Pulls in ./application-local.yml from the working directory when it exists, so real AWS
+  # credentials live in a gitignored file instead of here. "optional:" means the app still starts
+  # normally without it (mock services, aws.enabled=false). No profile flag needed - drop the file
+  # next to the pom and restart. See application-local.yml.example for the template.
+  config:
+    import: "optional:file:./application-local.yml"
+
   datasource:
     # File-based (not jdbc:h2:mem:) so registration/approval data survives an app restart - the
     # database lives at ./data/frverify.mv.db. data.sql is written with MERGE INTO (not plain
@@ -76,6 +83,11 @@ registration:
 
   mock:
     nic-valid: true
+    # No OCR runs in mock mode, so there is no number to extract and identity binding correctly
+    # reports UNAVAILABLE. Set this to a NIC number to make the mock claim it read one - the only
+    # way to exercise the binding path (match / mismatch / old-new format equivalence) without AWS.
+    # e.g. nic-number: "199012345678"
+    nic-number: ""
 
   # Local disk root for images captured during registration, written at capture time for every
   # attempt so a PENDING_APPROVAL record's images survive past the HTTP request (see
@@ -90,6 +102,22 @@ registration:
   # any other part of the app.
   comparison-dump:
     base-dir: ./data/comparison-analysis
+
+# ---------------------------------------------------------------------------
+# Offline evaluation harness (BatchEvaluationService, POST /api/v2/evaluate/batch) - replays
+# stored image sets through the real registration analysis pipeline with no device attached.
+#
+# corpus-root is a security boundary, not just a default: the endpoint takes a caller-supplied
+# directory and is currently unauthenticated, so any requested path is resolved inside this root
+# and rejected if it escapes it.
+#
+# ./data/pending-registrations is itself a valid corpus - RegistrationService already writes
+# nicImage.jpg / faceImage.jpg / selfImage.jpg per referenceId, which is exactly the layout the
+# harness expects, so every registration captured so far can be replayed with no extra setup.
+# ---------------------------------------------------------------------------
+evaluation:
+  corpus-root: ./data
+  output-root: ./data/evaluation-runs
 
 # ---------------------------------------------------------------------------
 # ID-card region detector (CardDetectorService) - local ONNX/OpenCV model, independent of
@@ -114,19 +142,28 @@ fr:
 # gitignored application-local.yml for anything beyond local testing.
 # ---------------------------------------------------------------------------
 aws:
-  # Set to true to switch both paths over to the real Rekognition*Service beans (AWS calls)
-  # instead of the Mock*Service beans - zero code changes needed, only this flag + the fields
-  # below. Leave false until region/bucket-name are filled in, otherwise the AWS SDK clients fail
-  # to build at startup.
+  # Master switch. false = Mock*Service beans (no AWS calls, no credentials needed); true = the
+  # real Rekognition/S3 services. Everything below is only read when this is true.
   enabled: true
   region: us-east-1
-  access-key: ASIARQTU3F4GMVOPAJ4X
-  secret-key: RkHnGhDOO9C9foWjVvaQc6ICQMTMcbqkf6iB+MmH
-  # Only needed for temporary/STS credentials (access key id starts with ASIA) - leave unset
-  # for a long-term IAM user access key (starts with AKIA).
-  session-token: IQoJb3JpZ2luX2VjELr//////////wEaCXVzLWVhc3QtMSJIMEYCIQCIpur3FnT6psoZy7zsXXAKwzqJtbN+b6u3Wk/g4xorDAIhAPBPo/GTWsyw+TLGEHYaa9aTjyer1A1/1kVcnjf4C83zKtEDCIL//////////wEQABoMMTA0Mzk4MDA4MDc2Igz7CjtYtSDMNsd6gBkqpQM6IcyK2Dahb4MngUuw0ToUEm2TNSo63c6cKlFhog0Je86aaH1lzdVIqt2DK+XUX8GNWi3I16G9xW+D69R5EX5VLShVgka1eXjzQQrsxMXXRcqplmXP2kNpc2c/mgGu1UfCT8IXrdRT0iFjv41kj3mkz0gwafTAw8LAIjqdGv8UbVBXO4KOOTjzRrwSDvEBeMBmpuzs/ij5/aEb/Mli7s7+XC+zvTMUcdPsHkne/bh6d2XUJGQXneiLW9apUPKSwhc9JgK/febsIr/g84uBf+XzyvO3teviplam82Fxe6HC4y9j6bGIYdhnViVpcIvwKjHutqVR9Mo2EyieWvEhLbk5lyCRq4I+eke8IYlKZp513Q6R0XWJkXe3eiNU6WWp2yEXM59jJ5A1cED4DQT9sfFvvAnIyXdYv33cw+i6/t7qGd2tNVCvz440IjCMPnOtV7qSwY2RJpCyEDxsqryxyz4sadZoyYR0JS1jsXZDyLem7CyOWADE08ttDIfrp4kO2YuJc58lmqTO+WJZ9cSBZxILVlBH28AQLkrDz8wxMKM/Z8jnDCiEMPXqqNMGOqcBo71C2KsvQfvtIiC1O4wx9hy+Ygl5PlWKVN6LGjqZXtanwZ6ieVxDZmEFKhUsEmRCzNdRGlSxLFWdKKZYUsPeU+G/RJluAAfgvzn90DTAi7+lp61fmp6ViQ+kL2Ez5f4u6M4wtme4VuTHJ67PHM9Eyb3A+6B7YTwch2y37rbd0OXPEx3i/79v7KpACEMZjcr9SsXk+3eq7pvtc/JhQWfjWbUh5zrUBWA=
+
+  # ---------------------------------------------------------------------------
+  # CREDENTIALS ARE NOT SET HERE.
+  #
+  # Put them in ./application-local.yml (gitignored, imported automatically at the top of this
+  # file). Copy application-local.yml.example to get started. Leaving these blank makes the AWS
+  # SDK fall back to its default credential chain (~/.aws/credentials, environment variables,
+  # instance profile), which is also fine.
+  #
+  # This file previously carried a live access key, secret and STS session token in plaintext,
+  # and that commit reached the remote. Those credentials must be treated as disclosed and
+  # rotated regardless of them having since expired.
+  # ---------------------------------------------------------------------------
+  access-key: "ASIARQTU3F4GBP2I5TAH"
+  secret-key: "jTNo59kkULO4OzWln5F/tqRDsircrqySmDhoMtDg"
+  session-token: "IQoJb3JpZ2luX2VjEE0aCXVzLWVhc3QtMSJGMEQCIGoZc49ZXkTdtNfvNplWcpqifJ7B4Vwe33K8fjoSmygvAiAAmRjco1iLSpFWRTuvngz7qJT+NlkPtO3xan8wmuccUyrIAwgWEAAaDDEwNDM5ODAwODA3NiIMhFF+mbcRruN+2QMKKqUDm9+m/pfJoJiuQTFeOG2lFruaxKGIcKaXSJ0dPGKwl8/PmlrhyUGUpRLzTIUWW4A9ooo3hTGyoX/moL6EsAa5s81YUAV2QOXlebrLxasgRGwokRLeqtLFAul2epHKVd6/iC8jpfOHrHmGnsumdW2e99tB0DK9NdK8/MUJZ3Io8GGwZhkMRbllreqCkYfSbHXONCx8TRvYl5yllOiFUk3xvSvmFq1eh9CCrG1KPm+VTYfmaAyTuOIDCzjXX+qZEUVOE4rOwbRXYfsOi8/CDw+KTieJmgqgcsCHGUoEgOeHZlva20YEJzEG1LsNzo/oGKVdajr1CMgE6l0pCokfqPAovOMsrakvXkTxKut85K4ncxBBkO/ywsAVeil/THmNBLbS2/tUpGPVWuOJe/7QiB7oZ6NTL2+8RFLMpPMkkkzw3XLE0gJknGuw0Q5Kuh0TdrEGu2nLOUPw4ilwm5G4Ob647FHJP0XkCx0wpH66USd3goT7qnv8hN/cge71cLQNj29DrFj/1+88hfdHuObM15knzNBVO4WBvW+libKv3cUGQ8b3blUNezD43rnUBjqpAaslkMmlH6OrtEntwtm7PoUWSU+kUTfsYyP3QyAKJzu996lMOjN2aIiGB90JqiSfVGu9qEk33amBhUEftl7PZe13XzstHSX1dKuIhNg4S39ln+Oe/MmNpuFN/Sp8Zc27fIEAE8iMy2YFxLe6m+cxxuqVMOO1Pno2Oca/Mm1WvHPFvsNFezjZ0XB2Ig7oBYYkvh3xXVe4sltnGDs2vA0WQIKpbcgyMAzDnU0="
+
   s3:
     # Bucket containing enrolled reference faces at FaceOnly/<nic>.jpg (see
     # RekognitionFaceRecognitionService / cf-fr-server Face_Recognition S3Service.getImageRef).
     bucket-name: frs3storage
-

@@ -1,12 +1,11 @@
 package lk.cf.fr.monolith.registration.service;
 
-import lk.cf.fr.monolith.card.CardDetectorService;
+import lk.cf.fr.monolith.analysis.RegistrationAnalysisService;
 import lk.cf.fr.monolith.device.DeviceCommunicationException;
 import lk.cf.fr.monolith.device.DeviceCommunicationService;
-import lk.cf.fr.monolith.document.DocumentProcessingService;
 import lk.cf.fr.monolith.document.NicValidationOutcome;
+import lk.cf.fr.monolith.identity.IdentityBindingResult;
 import lk.cf.fr.monolith.liveness.LivenessService;
-import lk.cf.fr.monolith.recognition.FaceRecognitionService;
 import lk.cf.fr.monolith.storage.ImageStorageException;
 import lk.cf.fr.monolith.storage.LocalPendingImageStorageService;
 import lk.cf.fr.monolith.registration.model.RegistrationApprovalStatus;
@@ -56,13 +55,11 @@ public class RegistrationService {
     private final DeviceResolutionService deviceResolutionService;
     private final RegistrationResultService registrationResultService;
     private final DeviceCommunicationService deviceCommunicationService;
-    private final DocumentProcessingService documentProcessingService;
-    private final FaceRecognitionService faceRecognitionService;
     private final LivenessService livenessService;
     private final LocalPendingImageStorageService localPendingImageStorageService;
     private final RegistrationFinalizationService registrationFinalizationService;
-    private final ComparisonImageDumpService comparisonImageDumpService;
-    private final CardDetectorService cardDetectorService;
+    /** Document OCR, identity binding, card cropping, the four comparisons and the gate - shared with the offline batch harness. */
+    private final RegistrationAnalysisService registrationAnalysisService;
 
     @Value("${registration.device-image-timeout-seconds:120}")
     private long captureTimeoutSeconds;
@@ -180,42 +177,17 @@ public class RegistrationService {
 
         session.setState(RegistrationState.FACE_PROCESSING);
 
-        // Crop the physical card region out of nicImage/selfImage before comparing - fixes a real
-        // failure mode where the device-captured nicImage frames the user's live face more
-        // prominently than the card (user holding the NIC up close to the camera), causing
-        // Rekognition to compare against the live face instead of the small printed photo on the
-        // card. cmp2 ("Device NIC vs Self NIC") is specifically a card-vs-card comparison, so both
-        // sides are cropped to their NIC region; cmp3 (face vs self face) intentionally keeps using
-        // the full uncropped selfImage since it needs the live face there, not the card. Falls back
-        // to the original uncropped bytes whenever no card is detected, so a missed detection never
-        // blocks registration - it just reverts to today's (pre-crop) behavior for that attempt.
-        byte[] nicCardCrop = cardDetectorService.cropCard(nicImage, "DeviceNIC", session.getReferenceId());
-        byte[] nicForComparison = nicCardCrop != null ? nicCardCrop : nicImage;
-        log.info("[Registration][Card-Crop] referenceId={} DeviceNIC crop {} ({} bytes -> {} bytes)",
-                session.getReferenceId(), nicCardCrop != null ? "succeeded" : "FAILED (falling back to full image)",
-                nicImage.length, nicForComparison.length);
+        // Card cropping + the four pairwise comparisons now live in RegistrationAnalysisService so
+        // the identical code can also be driven offline from stored images by the batch harness -
+        // see that class for the cropping rationale and the ordering constraint that keeps OCR
+        // where it is above rather than folding it in here.
+        RegistrationAnalysisService.FaceAnalysis faces = registrationAnalysisService.analyseFaces(
+                session.getReferenceId(), nicImage, faceImage, selfImage, scannedNicBytes, request.getMockSimilarity());
 
-        byte[] selfNicCardCrop = cardDetectorService.cropCard(selfImage, "SelfNIC", session.getReferenceId());
-        byte[] selfNicForComparison = selfNicCardCrop != null ? selfNicCardCrop : selfImage;
-        log.info("[Registration][Card-Crop] referenceId={} SelfNIC crop {} ({} bytes -> {} bytes)",
-                session.getReferenceId(), selfNicCardCrop != null ? "succeeded" : "FAILED (falling back to full image)",
-                selfImage.length, selfNicForComparison.length);
-
-        ComparisonResult cmp1 = faceRecognitionService.compareFacesInMemory(nicForComparison, faceImage, request.getMockSimilarity());
-        comparisonImageDumpService.dump(session.getReferenceId(), "cmp1-deviceNicVsFace", nicForComparison, faceImage, cmp1);
-
-        ComparisonResult cmp2 = faceRecognitionService.compareFacesInMemory(nicForComparison, selfNicForComparison, request.getMockSimilarity());
-        comparisonImageDumpService.dump(session.getReferenceId(), "cmp2-deviceNicVsSelfNic", nicForComparison, selfNicForComparison, cmp2);
-
-        ComparisonResult cmp3 = faceRecognitionService.compareFacesInMemory(faceImage, selfImage, request.getMockSimilarity());
-        comparisonImageDumpService.dump(session.getReferenceId(), "cmp3-faceVsSelfFace", faceImage, selfImage, cmp3);
-
-        ComparisonResult cmp4 = scannedNicBytes != null
-                ? faceRecognitionService.compareFacesInMemory(scannedNicBytes, faceImage, request.getMockSimilarity())
-                : null;
-        if (cmp4 != null) {
-            comparisonImageDumpService.dump(session.getReferenceId(), "cmp4-scannedNicVsFace", scannedNicBytes, faceImage, cmp4);
-        }
+        ComparisonResult cmp1 = faces.cmp1();
+        ComparisonResult cmp2 = faces.cmp2();
+        ComparisonResult cmp3 = faces.cmp3();
+        ComparisonResult cmp4 = faces.cmp4();
 
         // Gate mirrors legacy exactly: comparison 1 (device NIC vs face) is informational only and
         // excluded from the pass/fail gate - see REGISTRATION_PATH_MONOLITH_ARCHITECTURE.md §3.4
@@ -225,17 +197,35 @@ public class RegistrationService {
         // document's own description of scannedNIC as optional - see
         // REGISTRATION_IMPLEMENTATION_PROGRESS.md "Temporary assumptions". Liveness is now also part
         // of the gate (Registration Approval Workflow): it used to be computed but never checked here.
-        boolean similarityPassed = cmp2.match() && cmp3.match() && (cmp4 == null || cmp4.match());
-        boolean allPassed = similarityPassed && liveness.passed();
+        //
+        // NOTE: identity binding (the OCR'd NIC number vs. the claimed NIC) is computed and
+        // persisted below but deliberately NOT part of this gate, so the decision behaviour stays
+        // byte-identical to the frozen baseline it is meant to be compared against.
+        RegistrationAnalysisService.GateResult gate = registrationAnalysisService.evaluateGate(faces, liveness);
+        boolean allPassed = Boolean.TRUE.equals(gate.allPassed());
         String registrationStatus = allPassed
                 ? RegistrationApprovalStatus.AWS_APPROVED.name()
                 : RegistrationApprovalStatus.PENDING_APPROVAL.name();
         String overallDecision = allPassed ? "success" : "unsuccess";
-        String failureReason = allPassed ? null : buildFailureReason(similarityPassed, liveness.passed());
+        String failureReason = gate.failureReason();
+
+        RegistrationAnalysisService.DocumentAnalysis document = session.getDocumentAnalysis();
+        IdentityBindingResult binding = document != null ? document.binding() : null;
+        if (binding != null) {
+            log.info("[Registration][NIC-Binding] referenceId={} claimed={} extracted={} outcome={} score={} - evidence only, not gated",
+                    session.getReferenceId(), binding.claimed(), binding.extracted(), binding.outcome(), binding.score());
+        }
+
+        if (faces.consistency() != null && faces.consistency().isDivergent()) {
+            log.warn("[Registration][Cross-Channel] referenceId={} the presented card and the uploaded scan disagree "
+                    + "about the live face - possible document substitution. Evidence only, not gated. {}",
+                    session.getReferenceId(), faces.consistency().detail());
+        }
 
         session.setState(RegistrationState.REGISTRATION_PROCESSING);
-        registrationResultService.persistResult(session.getReferenceId(), cmp1, cmp2, cmp3, cmp4, liveness,
-                session.getValidNicStatus(), registrationStatus, similarityThreshold, livenessConfidenceThreshold, failureReason);
+        registrationResultService.persistResult(session.getReferenceId(), faces, liveness,
+                session.getValidNicStatus(), registrationStatus, similarityThreshold, livenessConfidenceThreshold,
+                failureReason, document != null ? document.ocr() : null, binding);
 
         boolean pendingApproval = !allPassed;
         String message;
@@ -268,26 +258,23 @@ public class RegistrationService {
                 .faceVsSelfFaceSimilarityScore(cmp3.similarity())
                 .scannedNicVsFaceMatch(cmp4 != null ? cmp4.match() : null)
                 .scannedNicVsFaceSimilarityScore(cmp4 != null ? cmp4.similarity() : null)
+                // Comparison 5 + the derived channel-agreement signal. Additive, non-gated.
+                .scannedNicVsDeviceNicMatch(faces.cmp5() != null ? faces.cmp5().match() : null)
+                .scannedNicVsDeviceNicSimilarityScore(faces.cmp5() != null ? faces.cmp5().similarity() : null)
+                .crossChannelStatus(faces.consistency() != null ? faces.consistency().status() : null)
+                .crossChannelDelta(faces.consistency() != null ? faces.consistency().delta() : null)
                 .livenessPassed(liveness.passed())
                 .livenessScore(liveness.confidence())
                 .livenessSessionId(session.getLivenessSessionId())
                 .validNicStatus(session.getValidNicStatus())
+                // Additive identity-binding evidence. Existing clients (Angular console, Android)
+                // ignore unknown JSON fields, so surfacing these breaks nothing.
+                .extractedNicNumber(document != null ? document.ocr().extractedNicNumber() : null)
+                .nicBindingOutcome(binding != null ? binding.outcome().name() : null)
+                .nicBindingScore(binding != null ? binding.score() : null)
+                .nicBindingDetail(binding != null ? binding.detail() : null)
                 .message(message)
                 .build();
-    }
-
-    private String buildFailureReason(boolean similarityPassed, boolean livenessPassed) {
-        StringBuilder reason = new StringBuilder();
-        if (!similarityPassed) {
-            reason.append("LOW_SIMILARITY");
-        }
-        if (!livenessPassed) {
-            if (reason.length() > 0) {
-                reason.append(",");
-            }
-            reason.append("LIVENESS_FAILED");
-        }
-        return reason.toString();
     }
 
     private void validateRequest(RegistrationRequest request) {
@@ -311,17 +298,21 @@ public class RegistrationService {
      * file was uploaded, since scannedNIC is optional.
      */
     private void validateScannedNic(RegistrationSession session, RegistrationRequest request, byte[] scannedNicBytes) {
+        RegistrationAnalysisService.DocumentAnalysis document = registrationAnalysisService.analyseDocument(
+                session.getReferenceId(), session.getNic(), scannedNicBytes, request.getMockNicValid());
+
+        session.setDocumentAnalysis(document);
+        session.setValidNicStatus(document.ocr().statusName());
+
         if (scannedNicBytes == null) {
-            log.info("[Registration][NIC-Check] referenceId={} nic={} no scannedNIC file uploaded -> NOT_PROVIDED (skipping OCR)",
-                    session.getReferenceId(), session.getNic());
-            session.setValidNicStatus("NOT_PROVIDED");
             return;
         }
-        log.info("[Registration][NIC-Check] referenceId={} nic={} scannedNIC uploaded ({} bytes) - running OCR validation",
-                session.getReferenceId(), session.getNic(), scannedNicBytes.length);
-        NicValidationOutcome outcome = documentProcessingService.validateNic(scannedNicBytes, request.getMockNicValid());
-        log.info("[Registration][NIC-Check] referenceId={} nic={} OCR outcome={}", session.getReferenceId(), session.getNic(), outcome);
-        session.setValidNicStatus(outcome.name());
+
+        NicValidationOutcome outcome = document.ocr().outcome();
+        log.info("[Registration][NIC-Check] referenceId={} nic={} OCR outcome={} extractedNic={} binding={}",
+                session.getReferenceId(), session.getNic(), outcome,
+                document.ocr().extractedNicNumber(), document.binding().outcome());
+
         if (outcome != NicValidationOutcome.VALID) {
             log.warn("[Registration][NIC-Check] referenceId={} nic={} rejecting registration - scanned document did not classify as a valid NIC (outcome={})",
                     session.getReferenceId(), session.getNic(), outcome);

@@ -1,11 +1,13 @@
 package lk.cf.fr.monolith.registration.service;
 
+import lk.cf.fr.monolith.analysis.RegistrationAnalysisService;
+import lk.cf.fr.monolith.document.NicOcrResult;
+import lk.cf.fr.monolith.identity.IdentityBindingResult;
 import lk.cf.fr.monolith.persistence.entity.RegistrationRecord;
 import lk.cf.fr.monolith.persistence.repository.RegistrationRecordRepository;
 import lk.cf.fr.monolith.registration.dto.RegistrationRequest;
 import lk.cf.fr.monolith.registration.model.RegistrationException;
 import lk.cf.fr.monolith.registration.model.RegistrationState;
-import lk.cf.fr.monolith.verification.model.ComparisonResult;
 import lk.cf.fr.monolith.verification.model.LivenessOutcome;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -68,20 +70,35 @@ public class RegistrationResultService {
         registrationRecordRepository.save(record);
     }
 
+    /**
+     * Takes the whole {@link RegistrationAnalysisService.FaceAnalysis} rather than each comparison
+     * separately - the parameter list had already reached the point where adding the two new
+     * cross-channel signals would have made it unreadable, and every caller has the analysis object
+     * to hand anyway.
+     */
     @Transactional
-    public void persistResult(String referenceId, ComparisonResult cmp1, ComparisonResult cmp2, ComparisonResult cmp3,
-                               ComparisonResult cmp4, LivenessOutcome liveness, String validNicStatus, String registrationStatus,
-                               Double similarityThreshold, Double livenessThreshold, String failureReason) {
+    public void persistResult(String referenceId, RegistrationAnalysisService.FaceAnalysis faces,
+                               LivenessOutcome liveness, String validNicStatus, String registrationStatus,
+                               Double similarityThreshold, Double livenessThreshold, String failureReason,
+                               NicOcrResult ocr, IdentityBindingResult binding) {
         RegistrationRecord record = getOrThrow(referenceId);
-        record.setMatch(cmp1.match());
-        record.setSimilarity(cmp1.similarity());
-        record.setMatch2(cmp2.match());
-        record.setSecondSimilarity(cmp2.similarity());
-        record.setMatch3(cmp3.match());
-        record.setThirdSimilarity(cmp3.similarity());
-        if (cmp4 != null) {
-            record.setMatch4(cmp4.match());
-            record.setFourthSimilarity(cmp4.similarity());
+        record.setMatch(faces.cmp1().match());
+        record.setSimilarity(faces.cmp1().similarity());
+        record.setMatch2(faces.cmp2().match());
+        record.setSecondSimilarity(faces.cmp2().similarity());
+        record.setMatch3(faces.cmp3().match());
+        record.setThirdSimilarity(faces.cmp3().similarity());
+        if (faces.cmp4() != null) {
+            record.setMatch4(faces.cmp4().match());
+            record.setFourthSimilarity(faces.cmp4().similarity());
+        }
+        if (faces.cmp5() != null) {
+            record.setMatch5(faces.cmp5().match());
+            record.setFifthSimilarity(faces.cmp5().similarity());
+        }
+        if (faces.consistency() != null) {
+            record.setCrossChannelStatus(faces.consistency().status());
+            record.setCrossChannelDelta(faces.consistency().delta());
         }
         record.setLivenessPassed(liveness.passed());
         record.setLivenessScore(liveness.confidence());
@@ -90,9 +107,24 @@ public class RegistrationResultService {
         record.setSimilarityThreshold(similarityThreshold);
         record.setLivenessThreshold(livenessThreshold);
         record.setFailureReason(failureReason);
+
+        // Identity-binding evidence - recorded, not gated.
+        if (ocr != null) {
+            record.setExtractedNicNumber(ocr.extractedNicNumber());
+            record.setOcrMeanLineConfidence(ocr.meanLineConfidence());
+        }
+        if (binding != null) {
+            record.setNicBindingOutcome(binding.outcome().name());
+            record.setNicBindingScore(binding.score());
+            record.setNicBindingEditDistance(binding.editDistance());
+        }
+
         record.setResTime(LocalDateTime.now());
         registrationRecordRepository.save(record);
-        log.info("[Registration] Persisted final result referenceId={} status={}", referenceId, registrationStatus);
+        log.info("[Registration] Persisted final result referenceId={} status={} nicBinding={} bindingScore={} crossChannel={}",
+                referenceId, registrationStatus,
+                binding != null ? binding.outcome() : null, binding != null ? binding.score() : null,
+                faces.consistency() != null ? faces.consistency().status() : null);
     }
 
     /** Mirrors Transaction.DatabaseWriteService.handleRemoveDbRecord - rolls back an incomplete record on hard failure. */

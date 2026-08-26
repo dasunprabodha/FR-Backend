@@ -67,7 +67,41 @@ public class RegistrationRecord {
     private Boolean match4;
     private Double fourthSimilarity;
 
+    // --- comparison 5: uploaded scanned NIC vs. the card physically presented to the camera ------
+    // Cross-channel document check: are the uploaded scan and the presented card even the same
+    // document? Nothing else in the pipeline asks this - OCR and authenticity only ever inspect the
+    // upload, while the gate only inspects the captures. Recorded, not gated.
+    private Boolean match5;
+    private Double fifthSimilarity;
+
+    // --- derived: agreement between the two document channels (cmp1 vs cmp4) --------------------
+    /** CONSISTENT | MARGINAL | DIVERGENT | UNAVAILABLE. */
+    private String crossChannelStatus;
+
+    /** Absolute difference in similarity points between the device-card and uploaded-scan channels. */
+    private Double crossChannelDelta;
+
     private String validNicStatus;
+
+    // --- Identity-binding evidence (document NIC number vs. claimed NIC) ---------------------
+    // Recorded for every attempt but NOT part of the pass/fail gate, so the existing conjunctive
+    // decision stays a valid frozen baseline. These columns are what an offline analysis reads to
+    // measure what binding would have been worth had it been gated.
+
+    /** NIC number OCR read off the presented document, normalised. Null when none was read. */
+    private String extractedNicNumber;
+
+    /** EXACT_MATCH | CONFUSION_CORRECTED_MATCH | FORMAT_EQUIVALENT_MATCH | PARTIAL | MISMATCH | UNAVAILABLE. */
+    private String nicBindingOutcome;
+
+    /** 0.0-1.0 binding strength; null when UNAVAILABLE (no evidence, as opposed to zero evidence-strength). */
+    private Double nicBindingScore;
+
+    /** Levenshtein distance between the canonical claimed and extracted numbers. */
+    private Integer nicBindingEditDistance;
+
+    /** Mean Rekognition per-line OCR confidence (0-100) - a document-quality term for later fusion. */
+    private Double ocrMeanLineConfidence;
 
     private Boolean livenessPassed;
     private Double livenessScore;
