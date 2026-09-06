@@ -14,6 +14,7 @@ import lk.cf.fr.monolith.registry.entity.DeviceRecord;
 import lk.cf.fr.monolith.registration.dto.RegistrationRequest;
 import lk.cf.fr.monolith.registration.dto.RegistrationResponse;
 import lk.cf.fr.monolith.registration.model.RegistrationException;
+import lk.cf.fr.monolith.registration.model.RegistrationMode;
 import lk.cf.fr.monolith.registration.model.RegistrationSession;
 import lk.cf.fr.monolith.registration.model.RegistrationState;
 import lk.cf.fr.monolith.verification.model.ComparisonResult;
@@ -73,10 +74,21 @@ public class RegistrationService {
     @Value("${verification.liveness-confidence-threshold:65}")
     private double livenessConfidenceThreshold;
 
+    /** Snapshotted onto the attempt alongside the other two, so explanations stay reproducible. */
+    @Value("${verification.binding-threshold:0.80}")
+    private double bindingThreshold;
+
     private final Map<String, RegistrationSession> activeSessions = new ConcurrentHashMap<>();
 
     public RegistrationResponse startRegistration(RegistrationRequest request, byte[] scannedNicBytes) {
         validateRequest(request);
+
+        // Resolved once, here, and then only ever read off the session - so the mode the device is
+        // told to use is provably the mode the caller asked for (see §13 of the change brief).
+        // Note this runs before the try: an invalid mode is a bad request, not a failed
+        // registration, so it must propagate as IllegalArgumentException -> 400 rather than being
+        // wrapped into a RegistrationException/PROCESSING_ERROR response.
+        RegistrationMode mode = RegistrationMode.fromRequestValue(request.getMode());
 
         String referenceId = UUID.randomUUID().toString();
         RegistrationSession session = null;
@@ -88,7 +100,9 @@ public class RegistrationService {
             registrationResultService.createOrSupersede(request, referenceId);
 
             session = new RegistrationSession(referenceId, request.getNic(), request.getUserId(),
-                    request.getCifNo(), request.getBranchId(), device.getDeviceId());
+                    request.getCifNo(), request.getBranchId(), device.getDeviceId(), mode);
+            log.info("[Registration] Registration request received with mode={} (raw={}) referenceId={} deviceId={}",
+                    mode, request.getMode(), referenceId, device.getDeviceId());
             activeSessions.put(referenceId, session);
 
             return runRegistration(session, request, scannedNicBytes);
@@ -198,10 +212,17 @@ public class RegistrationService {
         // REGISTRATION_IMPLEMENTATION_PROGRESS.md "Temporary assumptions". Liveness is now also part
         // of the gate (Registration Approval Workflow): it used to be computed but never checked here.
         //
-        // NOTE: identity binding (the OCR'd NIC number vs. the claimed NIC) is computed and
-        // persisted below but deliberately NOT part of this gate, so the decision behaviour stays
-        // byte-identical to the frozen baseline it is meant to be compared against.
-        RegistrationAnalysisService.GateResult gate = registrationAnalysisService.evaluateGate(faces, liveness);
+        // Identity binding (the OCR'd NIC number vs. the claimed NIC) participates only when
+        // verification.binding-gated is true. It ships false, which keeps this rule byte-identical
+        // to the frozen baseline - see RegistrationAnalysisService's class doc for why that
+        // default is load-bearing rather than merely cautious.
+        //
+        // The document analysis is read before the gate rather than after it because the gate now
+        // needs the binding result; nothing else about the ordering changed.
+        RegistrationAnalysisService.DocumentAnalysis document = session.getDocumentAnalysis();
+        IdentityBindingResult binding = document != null ? document.binding() : null;
+
+        RegistrationAnalysisService.GateResult gate = registrationAnalysisService.evaluateGate(faces, liveness, binding);
         boolean allPassed = Boolean.TRUE.equals(gate.allPassed());
         String registrationStatus = allPassed
                 ? RegistrationApprovalStatus.AWS_APPROVED.name()
@@ -209,11 +230,10 @@ public class RegistrationService {
         String overallDecision = allPassed ? "success" : "unsuccess";
         String failureReason = gate.failureReason();
 
-        RegistrationAnalysisService.DocumentAnalysis document = session.getDocumentAnalysis();
-        IdentityBindingResult binding = document != null ? document.binding() : null;
         if (binding != null) {
-            log.info("[Registration][NIC-Binding] referenceId={} claimed={} extracted={} outcome={} score={} - evidence only, not gated",
-                    session.getReferenceId(), binding.claimed(), binding.extracted(), binding.outcome(), binding.score());
+            log.info("[Registration][NIC-Binding] referenceId={} claimed={} extracted={} outcome={} score={} gated={} passed={}",
+                    session.getReferenceId(), binding.claimed(), binding.extracted(), binding.outcome(),
+                    binding.score(), gate.bindingGated(), gate.bindingPassed());
         }
 
         if (faces.consistency() != null && faces.consistency().isDivergent()) {
@@ -225,7 +245,8 @@ public class RegistrationService {
         session.setState(RegistrationState.REGISTRATION_PROCESSING);
         registrationResultService.persistResult(session.getReferenceId(), faces, liveness,
                 session.getValidNicStatus(), registrationStatus, similarityThreshold, livenessConfidenceThreshold,
-                failureReason, document != null ? document.ocr() : null, binding);
+                failureReason, document != null ? document.ocr() : null, binding,
+                bindingThreshold, gate.bindingGated());
 
         boolean pendingApproval = !allPassed;
         String message;
@@ -326,8 +347,11 @@ public class RegistrationService {
     private byte[] capture(RegistrationSession session, String tag, String prefLang) {
         CompletableFuture<byte[]> future;
         try {
+            // The 9-arg overload is the registration-only one: it is what puts "mode" into the
+            // open-camera payload. Verification calls the 8-arg overload and stays mode-free.
             future = deviceCommunicationService.requestCapture(session.getDeviceId(), session.getReferenceId(),
-                    session.getNic(), session.getUserId(), session.getBranchId(), "registration", tag, prefLang);
+                    session.getNic(), session.getUserId(), session.getBranchId(), "registration", tag, prefLang,
+                    session.getMode().name());
         } catch (DeviceCommunicationException e) {
             throw translateDeviceException(e);
         }

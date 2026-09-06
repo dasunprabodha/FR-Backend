@@ -23,6 +23,17 @@ public class RegistrationRequest {
     private String prefLang;
 
     /**
+     * Capture mode for this registration attempt: exactly {@code "Auto"} or {@code "Manual"},
+     * resolved to {@link lk.cf.fr.monolith.registration.model.RegistrationMode} by
+     * {@code RegistrationService} and forwarded to the device in every {@code open-camera}
+     * command of this flow. Kept as a raw {@code String} rather than the enum so an invalid value
+     * surfaces as a clean 400 from our own validation instead of a Jackson deserialisation error,
+     * matching how the other fields in this DTO are validated. Absent/null is accepted and means
+     * {@code Auto}, so clients written against the older contract are unaffected.
+     */
+    private String mode;
+
+    /**
      * MVP-only demo hooks (not present in the legacy contract): when the mock document/face/liveness
      * services are active, force the corresponding outcome instead of the configured default, so a
      * Postman client can demonstrate every branch without restarting the app. Ignored once

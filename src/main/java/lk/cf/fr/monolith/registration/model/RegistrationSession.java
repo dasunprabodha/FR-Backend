@@ -26,6 +26,14 @@ public class RegistrationSession {
     private final String cifNo;
     private final String branchId;
     private final String deviceId;
+    /**
+     * The one authoritative capture mode for this attempt, resolved once from the request in
+     * {@code RegistrationService.startRegistration} and read back by every device capture in this
+     * flow - so the value the device receives can never diverge from the value the caller asked
+     * for. Never null (a missing request value has already been defaulted to
+     * {@link RegistrationMode#DEFAULT} by then).
+     */
+    private final RegistrationMode mode;
     private final Instant createdAt = Instant.now();
 
     private final AtomicReference<RegistrationState> state = new AtomicReference<>(RegistrationState.CREATED);
@@ -51,13 +59,14 @@ public class RegistrationSession {
     private String errorMessage;
 
     public RegistrationSession(String referenceId, String nic, String userId, String cifNo,
-                                String branchId, String deviceId) {
+                                String branchId, String deviceId, RegistrationMode mode) {
         this.referenceId = referenceId;
         this.nic = nic;
         this.userId = userId;
         this.cifNo = cifNo;
         this.branchId = branchId;
         this.deviceId = deviceId;
+        this.mode = mode;
     }
 
     public RegistrationState getState() {

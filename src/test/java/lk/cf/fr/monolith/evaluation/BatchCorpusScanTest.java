@@ -30,11 +30,14 @@ class BatchCorpusScanTest {
     /**
      * Only the scan/classify path is exercised, so the analysis service is never reached. The
      * repository is still consulted though - a dry run resolves the claimed NIC by reference ID -
-     * so it needs a stub rather than a null.
+     * so it needs a stub rather than a null. The progress tracker is real, not a mock: it holds no
+     * collaborators of its own and the run loop calls into it for every sample, so a null there
+     * would fail every test for reasons that have nothing to do with what is being tested.
      */
     private BatchEvaluationService serviceFor(Path root) {
         BatchEvaluationService service = new BatchEvaluationService(
-                null, mock(RegistrationRecordRepository.class), new ObjectMapper());
+                null, null, mock(RegistrationRecordRepository.class), new ObjectMapper(),
+                new EvaluationProgressTracker());
         ReflectionTestUtils.setField(service, "corpusRoot", root.toString());
         ReflectionTestUtils.setField(service, "outputRoot", root.resolve("out").toString());
         return service;

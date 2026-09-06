@@ -80,7 +80,8 @@ public class RegistrationResultService {
     public void persistResult(String referenceId, RegistrationAnalysisService.FaceAnalysis faces,
                                LivenessOutcome liveness, String validNicStatus, String registrationStatus,
                                Double similarityThreshold, Double livenessThreshold, String failureReason,
-                               NicOcrResult ocr, IdentityBindingResult binding) {
+                               NicOcrResult ocr, IdentityBindingResult binding,
+                               Double bindingThreshold, boolean bindingGated) {
         RegistrationRecord record = getOrThrow(referenceId);
         record.setMatch(faces.cmp1().match());
         record.setSimilarity(faces.cmp1().similarity());
@@ -108,7 +109,9 @@ public class RegistrationResultService {
         record.setLivenessThreshold(livenessThreshold);
         record.setFailureReason(failureReason);
 
-        // Identity-binding evidence - recorded, not gated.
+        // Identity-binding evidence. Always recorded; gated only when configured to be, with both
+        // the threshold and that choice snapshotted so the evidence panel can reconstruct which
+        // rule was actually applied.
         if (ocr != null) {
             record.setExtractedNicNumber(ocr.extractedNicNumber());
             record.setOcrMeanLineConfidence(ocr.meanLineConfidence());
@@ -118,12 +121,15 @@ public class RegistrationResultService {
             record.setNicBindingScore(binding.score());
             record.setNicBindingEditDistance(binding.editDistance());
         }
+        record.setNicBindingThreshold(bindingThreshold);
+        record.setNicBindingGated(bindingGated);
 
         record.setResTime(LocalDateTime.now());
         registrationRecordRepository.save(record);
-        log.info("[Registration] Persisted final result referenceId={} status={} nicBinding={} bindingScore={} crossChannel={}",
+        log.info("[Registration] Persisted final result referenceId={} status={} nicBinding={} bindingScore={} bindingGated={} crossChannel={}",
                 referenceId, registrationStatus,
                 binding != null ? binding.outcome() : null, binding != null ? binding.score() : null,
+                bindingGated,
                 faces.consistency() != null ? faces.consistency().status() : null);
     }
 

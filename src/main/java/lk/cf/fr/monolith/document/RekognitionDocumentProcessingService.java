@@ -74,6 +74,11 @@ public class RekognitionDocumentProcessingService implements DocumentProcessingS
             // 9-digit number legitimately contributes two candidates.
             Set<String> uncorrectedCandidates = new LinkedHashSet<>();
             Set<String> correctedCandidates = new LinkedHashSet<>();
+
+            // Lowest-trust bucket, appended after both of the above: numbers whose V/X check
+            // letter never arrived. Kept separate so a complete reading always wins the primary
+            // slot, and so the results table can say which samples relied on this path.
+            Set<String> letterlessCandidates = new LinkedHashSet<>();
             NicOcrResult.NicNumberFormat primaryFormat = NicOcrResult.NicNumberFormat.NONE;
 
             for (TextDetection detection : detections) {
@@ -112,6 +117,21 @@ public class RekognitionDocumentProcessingService implements DocumentProcessingS
                         if (primaryFormat == NicOcrResult.NicNumberFormat.NONE) {
                             primaryFormat = NicOcrResult.NicNumberFormat.OLD_9_PLUS_LETTER;
                         }
+                    }
+                }
+
+                // Old-format number with no check letter attached. Rekognition emits the digit
+                // block and the letter as separate LINE detections when the letter is set apart on
+                // the card, and omits it entirely on worn ones - so requiring the letter throws
+                // away a complete, high-confidence number over a character that was never read.
+                // The day-of-year structure check inside isOldFormatWithoutCheckLetter is what
+                // stops this from matching arbitrary nine-digit strings.
+                if (SriLankanNicFormat.isOldFormatWithoutCheckLetter(compact)) {
+                    log.info("[NIC-OCR]   -> matched old-NIC digits with no check letter: \"{}\" (normalized=\"{}\")", text, compact);
+                    oldNationalId = true;
+                    letterlessCandidates.add(compact);
+                    if (primaryFormat == NicOcrResult.NicNumberFormat.NONE) {
+                        primaryFormat = NicOcrResult.NicNumberFormat.OLD_9_NO_LETTER;
                     }
                 }
 
@@ -189,6 +209,7 @@ public class RekognitionDocumentProcessingService implements DocumentProcessingS
 
             List<String> candidates = new ArrayList<>(uncorrectedCandidates);
             correctedCandidates.stream().filter(c -> !uncorrectedCandidates.contains(c)).forEach(candidates::add);
+            letterlessCandidates.stream().filter(c -> !candidates.contains(c)).forEach(candidates::add);
 
             String primary = candidates.isEmpty() ? null : candidates.get(0);
             boolean correctionApplied = primary != null && !uncorrectedCandidates.contains(primary);

@@ -52,12 +52,36 @@ public class DecisionExplanationService {
     private final RegistrationRecordRepository registrationRecordRepository;
 
     /**
-     * Threshold identity binding would be held to <em>if</em> it were gated. Set to the bottom of
-     * the match band in {@code IdentityBindingService} (EXACT 1.00 / CONFUSION 0.85 / FORMAT 0.80),
-     * so "would have passed" means "bound by one of the three positive outcomes".
+     * Fallback threshold for rows written before the per-attempt snapshot existed.
+     *
+     * <p>Reads the same key the gate reads, so the panel can never report a threshold the decision
+     * did not use. Set to the bottom of the match band in {@code IdentityBindingService}
+     * (EXACT 1.00 / CONFUSION 0.85 / FORMAT 0.80), so "bound" means "bound by one of the three
+     * positive outcomes".
      */
-    @Value("${explain.binding-threshold:0.80}")
+    @Value("${verification.binding-threshold:0.80}")
     private double bindingThreshold;
+
+    /**
+     * The threshold this attempt was actually held to, preferring its own snapshot.
+     *
+     * <p>Falling back to current configuration is only correct for rows predating the snapshot;
+     * for everything since, the stored value is what the decision used and current config is
+     * irrelevant to explaining it.
+     */
+    private double bindingThresholdFor(RegistrationRecord record) {
+        return orDefault(record.getNicBindingThreshold(), bindingThreshold);
+    }
+
+    /**
+     * Whether binding participated in this attempt's rule.
+     *
+     * <p>Null means the row predates the switch, when binding was never gated - so false is the
+     * historically accurate reading, not merely a safe default.
+     */
+    private boolean bindingWasGated(RegistrationRecord record) {
+        return Boolean.TRUE.equals(record.getNicBindingGated());
+    }
 
     public DecisionExplanation explainByReferenceId(String referenceId) {
         RegistrationRecord record = registrationRecordRepository.findByReferenceId(referenceId)
@@ -114,10 +138,7 @@ public class DecisionExplanationService {
                 record.getStatus(),
                 passed,
                 primaryReason(record, passed, gatedFailures),
-                "All of: document-vs-self comparison, live-face-vs-self comparison, "
-                        + "scanned-document comparison (when a document was supplied), and liveness "
-                        + "must independently clear their thresholds. Comparison 1 and identity binding "
-                        + "are recorded but excluded from this rule.",
+                decisionRule(record),
                 ranked,
                 counterfactual(passed, gatedFailures, closest.orElse(null)),
                 hypothetical(record, passed),
@@ -166,17 +187,23 @@ public class DecisionExplanationService {
     private EvidenceItem identityBinding(RegistrationRecord record) {
         String outcome = record.getNicBindingOutcome();
         Double score = record.getNicBindingScore();
+        double threshold = bindingThresholdFor(record);
+        boolean gated = bindingWasGated(record);
 
         if (outcome == null || "UNAVAILABLE".equals(outcome)) {
+            // Absent evidence is UNAVAILABLE even under a gating rule. Whether it *blocked* is a
+            // separate question answered by binding-required, and the gate's own failure reason
+            // records that; rendering "no document number" as a measured failure would misstate
+            // what happened.
             return new EvidenceItem("identity.binding", "Document number vs. claimed NIC", CAT_IDENTITY,
-                    EvidenceItem.STATUS_UNAVAILABLE, null, bindingThreshold, null, UNIT_SCORE,
-                    outcome == null ? "UNAVAILABLE" : outcome, false, false,
+                    EvidenceItem.STATUS_UNAVAILABLE, null, threshold, null, UNIT_SCORE,
+                    outcome == null ? "UNAVAILABLE" : outcome, gated, false,
                     "OCR text + claimed NIC",
                     "No document number was available to compare against the claimed NIC, so this "
                             + "attempt carries no evidence that the document belongs to the applicant.");
         }
 
-        boolean bound = score != null && score >= bindingThreshold;
+        boolean bound = score != null && score >= threshold;
         String distance = record.getNicBindingEditDistance() != null
                 ? " (" + record.getNicBindingEditDistance() + " character difference)" : "";
 
@@ -184,14 +211,14 @@ public class DecisionExplanationService {
                 ? "The NIC number printed on the document matches the NIC the applicant claimed"
                         + ("EXACT_MATCH".equals(outcome) ? " exactly." : ", after normalisation.")
                 : "The NIC number read from the document does NOT match the claimed NIC" + distance
-                        + ". This is the signature of a genuine card belonging to someone else - and it is "
-                        + "not part of the decision rule.";
+                        + ". This is the signature of a genuine card belonging to someone else"
+                        + (gated ? " - and this attempt was held to it." : " - and it is not part of the decision rule.");
 
         return new EvidenceItem("identity.binding", "Document number vs. claimed NIC", CAT_IDENTITY,
                 bound ? EvidenceItem.STATUS_PASS : EvidenceItem.STATUS_FAIL,
-                score, bindingThreshold,
-                score == null ? null : round(score - bindingThreshold),
-                UNIT_SCORE, outcome, false, false,
+                score, threshold,
+                score == null ? null : round(score - threshold),
+                UNIT_SCORE, outcome, gated, false,
                 "OCR text + claimed NIC", detail);
     }
 
@@ -334,6 +361,17 @@ public class DecisionExplanationService {
                 UNIT_CONFIDENCE, null, true, false, "AWS Face Liveness session", detail);
     }
 
+    /** The rule actually in force for this attempt, spelled out so the panel reads what was applied. */
+    private String decisionRule(RegistrationRecord record) {
+        String base = "All of: document-vs-self comparison, live-face-vs-self comparison, "
+                + "scanned-document comparison (when a document was supplied), and liveness "
+                + "must independently clear their thresholds. ";
+        return bindingWasGated(record)
+                ? base + "The document number must also bind to the claimed NIC. Comparison 1 is "
+                        + "recorded but excluded from this rule."
+                : base + "Comparison 1 and identity binding are recorded but excluded from this rule.";
+    }
+
     // ---------------------------------------------------------------------------------------
     // Ranking, reasons, counterfactual
     // ---------------------------------------------------------------------------------------
@@ -412,45 +450,96 @@ public class DecisionExplanationService {
     }
 
     /**
-     * What the deployed rule and the binding-aware rule would each have decided. The interesting
-     * case is a pass with a binding mismatch: the deployed gate approves, the binding-aware rule
-     * does not, and the difference is visible on a real attempt rather than asserted.
+     * What the rule in force and the other rule would each have decided.
+     *
+     * <p>Reads in both directions. With binding ungated, the alternative adds it, and the
+     * interesting case is a pass that the binding-aware rule would have rejected. With binding
+     * gated, the alternative removes it, and the interesting case is a rejection the old
+     * conjunctive baseline would have waved through - the same finding, seen from the other side.
      */
     private Hypothetical hypothetical(RegistrationRecord record, boolean passed) {
         Double score = record.getNicBindingScore();
         String outcome = record.getNicBindingOutcome();
+        double threshold = bindingThresholdFor(record);
+        boolean gated = bindingWasGated(record);
+
+        String actualLabel = gated ? "Deployed rule (with binding)" : "Deployed rule";
+        String alternativeLabel = gated ? "Without identity binding" : "+ identity binding";
 
         if (score == null || outcome == null || "UNAVAILABLE".equals(outcome)) {
-            return new Hypothetical("UNCHANGED_NO_EVIDENCE", false, null, bindingThreshold,
-                    "No identity-binding evidence exists for this attempt, so gating it would change nothing. "
-                            + "Note that this is itself a finding: without a scanned document, nothing ties the "
-                            + "presented identity to the claimed NIC.");
+            return new Hypothetical(actualLabel, alternativeLabel, "UNCHANGED_NO_EVIDENCE", false,
+                    null, threshold,
+                    "No identity-binding evidence exists for this attempt, so the two rules cannot "
+                            + "differ on it. Note that this is itself a finding: without a scanned document, "
+                            + "nothing ties the presented identity to the claimed NIC.");
         }
 
-        boolean bindingWouldPass = score >= bindingThreshold;
-        boolean wouldPassOverall = passed && bindingWouldPass;
-        boolean differs = wouldPassOverall != passed;
+        boolean bindingWouldPass = score >= threshold;
+
+        boolean alternativePasses;
+        if (gated) {
+            // Alternative = the baseline without binding. When binding passed it contributed
+            // nothing, so the recorded outcome already is the baseline's. When it failed it was
+            // sufficient on its own, and the baseline's verdict has to come from the rest.
+            alternativePasses = bindingWouldPass ? passed : noGatedFailuresOtherThanBinding(record);
+        } else {
+            alternativePasses = passed && bindingWouldPass;
+        }
+        boolean differs = alternativePasses != passed;
 
         String explanation;
-        if (differs) {
+        if (differs && gated) {
+            explanation = String.format(
+                    "This attempt was rejected because the document number did not bind to the claimed NIC "
+                            + "(%.2f against a %.2f threshold, %s). The conjunctive baseline this system "
+                            + "shipped with would have approved it: the face comparisons all passed, because "
+                            + "the photograph genuinely matches - it is the number that does not.",
+                    score, threshold, outcome);
+        } else if (differs) {
             explanation = String.format(
                     "The deployed rule approved this attempt on face and liveness evidence alone. Had identity "
                             + "binding been gated, it would have been rejected: the document number scored %.2f "
                             + "against a %.2f threshold (%s). The face comparisons cannot detect this, because the "
                             + "photograph genuinely matches - it is the number that does not.",
-                    score, bindingThreshold, outcome);
+                    score, threshold, outcome);
         } else if (!passed && !bindingWouldPass) {
             explanation = String.format(
-                    "This attempt was already routed for review, and identity binding also failed (%.2f, %s), so "
-                            + "gating binding would have reached the same outcome by an additional route.",
+                    "Identity binding failed (%.2f, %s) and this attempt was routed for review, so both rules "
+                            + "reach the same outcome - one of them by an additional route.",
                     score, outcome);
         } else {
             explanation = String.format(
-                    "Identity binding succeeded (%.2f, %s), so gating it would not have changed this outcome.",
+                    "Identity binding succeeded (%.2f, %s), so it makes no difference to this outcome either way.",
                     score, outcome);
         }
 
-        return new Hypothetical(bindingWouldPass ? "PASS" : "FAIL", differs, score, bindingThreshold, explanation);
+        return new Hypothetical(actualLabel, alternativeLabel,
+                bindingWouldPass ? "PASS" : "FAIL", differs, score, threshold, explanation);
+    }
+
+    /**
+     * Whether every gated item other than binding cleared its threshold.
+     *
+     * <p>Needed only when binding was gated and failed: the recorded outcome is then a rejection
+     * regardless of the rest, so the baseline's verdict has to be reconstructed from the other
+     * evidence rather than inferred from the result.
+     */
+    private boolean noGatedFailuresOtherThanBinding(RegistrationRecord record) {
+        double similarityThreshold = orDefault(record.getSimilarityThreshold(), 80.0);
+        boolean cmp2 = clears(record.getSecondSimilarity(), similarityThreshold, record.getMatch2());
+        boolean cmp3 = clears(record.getThirdSimilarity(), similarityThreshold, record.getMatch3());
+        boolean cmp4 = record.getMatch4() == null && record.getFourthSimilarity() == null
+                || clears(record.getFourthSimilarity(), similarityThreshold, record.getMatch4());
+        boolean liveness = Boolean.TRUE.equals(record.getLivenessPassed());
+        return cmp2 && cmp3 && cmp4 && liveness;
+    }
+
+    /** Prefer the recorded match flag; fall back to comparing the score when it is absent. */
+    private boolean clears(Double value, double threshold, Boolean match) {
+        if (match != null) {
+            return match;
+        }
+        return value != null && value >= threshold;
     }
 
     private List<String> notes(RegistrationRecord record, boolean passed) {
@@ -460,8 +549,11 @@ public class DecisionExplanationService {
                 + "for how those scores were combined, not for how they were produced.");
 
         if (record.getNicBindingOutcome() != null && !"UNAVAILABLE".equals(record.getNicBindingOutcome())) {
-            notes.add("Identity binding is recorded on every attempt but deliberately excluded from the decision "
-                    + "rule, so the deployed gate remains an unmodified baseline for comparison.");
+            notes.add(bindingWasGated(record)
+                    ? "Identity binding was part of the decision rule for this attempt. The conjunctive "
+                            + "baseline that excludes it is shown alongside, for comparison."
+                    : "Identity binding is recorded on every attempt but deliberately excluded from the decision "
+                            + "rule, so the deployed gate remains an unmodified baseline for comparison.");
         }
 
         if (record.getValidNicStatus() == null || "NOT_PROVIDED".equals(record.getValidNicStatus())) {

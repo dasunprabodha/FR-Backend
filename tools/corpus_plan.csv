@@ -1,0 +1,53 @@
+sampleId,subject,groundTruth,attackType,nicImage,faceImage,selfImage,scannedNic,claim,lighting,notes
+milan-G01,milan,GENUINE,,3,20,18,75,SELF,L1,reference sample
+milan-G02,milan,GENUINE,,3,21,19,75,SELF,L2,second capture condition
+kavinda-G01,kavinda,GENUINE,,4,47,45,73,SELF,L1,
+kavinda-G02,kavinda,GENUINE,,4,48,46,73,SELF,L2,second capture condition
+nuwan-G01,nuwan,GENUINE,,5,64,62,71,SELF,L1,
+sumudu-G01,sumudu,GENUINE,,6,57,51,70,SELF,L1,
+sumudu-G02,sumudu,GENUINE,,55,57,52,70,SELF,L2,second capture condition
+sumudu-G03,sumudu,GENUINE,,56,57,53,70,SELF,L3,third capture condition
+dilshan-G01,dilshan,GENUINE,,7,26,24,74,SELF,L1,
+dilshan-G02,dilshan,GENUINE,,7,26,25,74,SELF,L2,second capture condition
+buddhi-G01,buddhi,GENUINE,,40,39,36,,SELF,L1,no scan in dataset - NOT_PROVIDED control
+buddhi-G02,buddhi,GENUINE,,40,39,37,,SELF,L2,no scan in dataset - NOT_PROVIDED control
+buddhi-G03,buddhi,GENUINE,,40,39,38,,SELF,L3,no scan in dataset - NOT_PROVIDED control
+pravinda-G01,pravinda,GENUINE,,66,67,65,,SELF,L1,no scan in dataset - NOT_PROVIDED control
+dilini-G01,dilini,GENUINE,,82,79,81,,SELF,L1,no scan in dataset - NOT_PROVIDED control
+milan-A01-CLAIM,milan,ATTACK,CLAIM_MISMATCH,3,21,19,75,SYNTHETIC,L2,own card and scan; fabricated claimed number
+kavinda-A01-CLAIM,kavinda,ATTACK,CLAIM_MISMATCH,4,48,46,73,SYNTHETIC,L2,own card and scan; fabricated claimed number
+nuwan-A01-CLAIM,nuwan,ATTACK,CLAIM_MISMATCH,5,64,62,71,SYNTHETIC,L2,own card and scan; fabricated claimed number; shares images with nuwan-G01
+sumudu-A01-CLAIM,sumudu,ATTACK,CLAIM_MISMATCH,56,57,54,70,SYNTHETIC,L3,own card and scan; fabricated claimed number
+dilshan-A01-CLAIM,dilshan,ATTACK,CLAIM_MISMATCH,7,26,25,74,SYNTHETIC,L2,own card and scan; fabricated claimed number
+dilshan-A02-SWAP,dilshan,ATTACK,MISMATCHED_GENUINE_NIC,4,26,22,73,SELF,L1,presents kavinda card
+dilshan-A03-SWAP,dilshan,ATTACK,MISMATCHED_GENUINE_NIC,4,26,23,73,SELF,L2,presents kavinda card
+kavinda-A02-SWAP,kavinda,ATTACK,MISMATCHED_GENUINE_NIC,5,47,43,71,SELF,L1,presents nuwan card
+kavinda-A03-SWAP,kavinda,ATTACK,MISMATCHED_GENUINE_NIC,5,48,44,71,SELF,L2,presents nuwan card
+nuwan-A02-SWAP,nuwan,ATTACK,MISMATCHED_GENUINE_NIC,2,64,60,69,SELF,L1,presents dasun card
+nuwan-A03-SWAP,nuwan,ATTACK,MISMATCHED_GENUINE_NIC,2,64,61,69,SELF,L2,presents dasun card
+dilini-A01-SWAP,dilini,ATTACK,MISMATCHED_GENUINE_NIC,2,79,80,69,SELF,L1,presents dasun card
+dilshan-A04-SWAP-NOSCAN,dilshan,ATTACK,MISMATCHED_GENUINE_NIC,4,26,23,,SELF,L2,scan deliberately withheld
+kavinda-A04-SWAP-NOSCAN,kavinda,ATTACK,MISMATCHED_GENUINE_NIC,5,48,44,,SELF,L2,scan deliberately withheld
+nuwan-A04-SWAP-NOSCAN,nuwan,ATTACK,MISMATCHED_GENUINE_NIC,2,64,61,,SELF,L2,scan deliberately withheld
+kavinda-A05-DOC,kavinda,ATTACK,MISMATCHED_GENUINE_DOC,8,47,41,72,SELF,L1,presents dasun driving licence
+kavinda-A06-DOC,kavinda,ATTACK,MISMATCHED_GENUINE_DOC,8,48,42,72,SELF,L2,presents dasun driving licence
+dasun-G01,dasun,GENUINE,,2,85,13,69,SELF,L1,
+dasun-G02,dasun,GENUINE,,76,85,77,78,SELF,L2,second capture condition
+nipuna-G01,nipuna,GENUINE,,1,86,15,68,SELF,L1,
+nipuna-G02,nipuna,GENUINE,,17,86,16,68,SELF,L2,second capture condition
+madhuka-G01,madhuka,GENUINE,,34,84,29,,SELF,L1,no scan in dataset - NOT_PROVIDED control
+madhuka-G02-UNIID,madhuka,GENUINE,,30,84,27,,SELF,L1,own university ID not a NIC - document-type control
+madhuka-G03-UNIID,madhuka,GENUINE,,31,84,28,,SELF,L2,own university ID not a NIC - document-type control
+dasun-A01-CLAIM,dasun,ATTACK,CLAIM_MISMATCH,76,85,77,78,SYNTHETIC,L2,own card and scan; fabricated claimed number
+nipuna-A01-CLAIM,nipuna,ATTACK,CLAIM_MISMATCH,17,86,16,68,SYNTHETIC,L2,own card and scan; fabricated claimed number
+dasun-A02-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,7,85,9,74,SELF,L1,presents dilshan card
+dasun-A03-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,6,85,10,70,SELF,L1,presents sumudu card
+dasun-A04-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,55,85,49,70,SELF,L2,presents sumudu card
+dasun-A05-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,56,85,50,70,SELF,L3,presents sumudu card
+dasun-A06-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,5,85,11,71,SELF,L1,presents nuwan card
+dasun-A07-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,5,85,58,71,SELF,L2,presents nuwan card
+dasun-A08-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,5,85,59,71,SELF,L3,presents nuwan card
+dasun-A09-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,4,85,12,73,SELF,L1,presents kavinda card
+dasun-A10-SWAP,dasun,ATTACK,MISMATCHED_GENUINE_NIC,1,85,14,68,SELF,L1,presents nipuna card
+dasun-A11-SWAP-NOSCAN,dasun,ATTACK,MISMATCHED_GENUINE_NIC,5,85,58,,SELF,L2,scan deliberately withheld
+dasun-A12-SWAP-NOSCAN,dasun,ATTACK,MISMATCHED_GENUINE_NIC,56,85,50,,SELF,L3,scan deliberately withheld

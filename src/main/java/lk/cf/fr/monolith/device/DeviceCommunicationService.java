@@ -50,9 +50,27 @@ public class DeviceCommunicationService {
      * future that resolves with the captured image bytes (or fails with a camera/device error).
      * Replaces any previously pending capture for this referenceId (registration issues this
      * sequentially for nicImage, then faceImage, then selfImage).
+     *
+     * <p>This overload emits the historical payload with no {@code mode} key at all, and is what
+     * the verification path calls - keeping that path's wire format byte-identical to what it was
+     * before capture modes existed.
      */
     public CompletableFuture<byte[]> requestCapture(String deviceId, String referenceId, String nic, String userId,
                                                       String branchId, String flow, String tag, String prefLang) {
+        return requestCapture(deviceId, referenceId, nic, userId, branchId, flow, tag, prefLang, null);
+    }
+
+    /**
+     * As above, plus the registration-only {@code mode} field ("Auto"/"Manual"), which tells the
+     * device whether to capture automatically or to show its manual capture button for this step.
+     *
+     * <p>{@code mode} is only written into the payload when non-null, so no unrelated device
+     * command ever gains a {@code "mode"} key (not even {@code "mode": null}) - the isolation
+     * requirement in §11 of the change brief. Only {@code RegistrationService} passes a value.
+     */
+    public CompletableFuture<byte[]> requestCapture(String deviceId, String referenceId, String nic, String userId,
+                                                      String branchId, String flow, String tag, String prefLang,
+                                                      String mode) {
         if (!sessionRegistry.isOnline(deviceId, CLIENT_TYPE)) {
             throw deviceUnavailable(deviceId);
         }
@@ -70,6 +88,11 @@ public class DeviceCommunicationService {
         data.put("deviceId", deviceId);
         data.put("reverifyTag", null);
         data.put("prefLang", prefLang);
+        if (mode != null) {
+            data.put("mode", mode);
+            log.info("[Device] open-camera payload built with mode={} flow={} tag={} referenceId={}",
+                    mode, flow, tag, referenceId);
+        }
 
         Map<String, Object> command = new LinkedHashMap<>();
         command.put("command", "open-camera");

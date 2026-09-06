@@ -157,4 +157,61 @@ class SriLankanNicFormatTest {
             assertEquals(0.0, SriLankanNicFormat.normalisedSimilarity("199012345678", null));
         }
     }
+
+    @Nested
+    @DisplayName("old format read without its check letter")
+    class LetterlessOldFormat {
+
+        // Rekognition returned exactly this off a worn 2013 Sinhala-only card in the pilot corpus:
+        // the nine digits at 97.5% confidence, on their own line, with the V never detected at all.
+        private static final String AS_OCR_READ_IT = "970910409";
+        private static final String AS_THE_HOLDER_WRITES_IT = "970910409V";
+
+        @Test
+        void nineBareDigitsAreRecognisedAsAnOldFormatReading() {
+            assertTrue(SriLankanNicFormat.isOldFormatWithoutCheckLetter(AS_OCR_READ_IT));
+        }
+
+        @Test
+        void theStrictOldFormatCheckStillRequiresTheLetter() {
+            assertFalse(SriLankanNicFormat.isOldFormat(AS_OCR_READ_IT));
+        }
+
+        @Test
+        void aLetterlessReadingBindsAgainstTheSameNumberWrittenWithTheLetter() {
+            assertEquals(SriLankanNicFormat.canonicalise(AS_THE_HOLDER_WRITES_IT),
+                    SriLankanNicFormat.canonicalise(AS_OCR_READ_IT));
+        }
+
+        @Test
+        void andAgainstTheSameNumberWrittenInNewFormat() {
+            assertEquals("199709100409", SriLankanNicFormat.canonicalise(AS_OCR_READ_IT));
+        }
+
+        @Test
+        void impossibleDayOfYearValuesAreRejected() {
+            // 001-366, or 501-866 for female holders. Everything else cannot be a NIC.
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("970000409"), "day 000");
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("973670409"), "day 367");
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("975000409"), "day 500");
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("978670409"), "day 867");
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("979990409"), "day 999");
+        }
+
+        @Test
+        void plausibleDayOfYearValuesAreAccepted() {
+            assertTrue(SriLankanNicFormat.isOldFormatWithoutCheckLetter("970010409"), "day 001");
+            assertTrue(SriLankanNicFormat.isOldFormatWithoutCheckLetter("973660409"), "day 366");
+            assertTrue(SriLankanNicFormat.isOldFormatWithoutCheckLetter("975010409"), "day 501 (female)");
+            assertTrue(SriLankanNicFormat.isOldFormatWithoutCheckLetter("978660409"), "day 866 (female)");
+        }
+
+        @Test
+        void otherLengthsAndNullAreRejected() {
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("97091040"));
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter("199012345678"));
+            assertFalse(SriLankanNicFormat.isOldFormatWithoutCheckLetter(null));
+            assertNull(SriLankanNicFormat.oldToNewWithoutCheckLetter("973670409"));
+        }
+    }
 }

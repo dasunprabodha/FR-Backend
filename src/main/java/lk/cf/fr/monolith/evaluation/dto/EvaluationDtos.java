@@ -101,6 +101,29 @@ public final class EvaluationDtos {
         private Map<String, String> extra;
     }
 
+    /**
+     * The dependency-aware rule's verdict for one sample, recorded beside the baseline's.
+     *
+     * <p>Nested rather than flattened into {@link SampleResult} so that adding a group later does
+     * not renumber thirty-odd positional constructor arguments. Null on samples that errored
+     * before analysis, and on dry runs.
+     *
+     * <p>Per-group state and score are both carried: the state is what the rule acted on, the
+     * score is what lets a threshold sweep re-derive the decision at other operating points
+     * without re-running Rekognition.
+     */
+    public record ProposedDecision(
+            String decision,
+            String drivers,
+            String reason,
+            String documentPortraitState, Double documentPortraitScore,
+            String coPresenceState, Double coPresenceScore,
+            String channelAgreementState, Double channelAgreementScore,
+            String identityBindingState, Double identityBindingScore,
+            String livenessState, Double livenessGroupScore
+    ) {
+    }
+
     /** One row of the results table - one sample, fully analysed. */
     public record SampleResult(
             String sampleId,
@@ -145,7 +168,10 @@ public final class EvaluationDtos {
 
             long documentLatencyMs,
             long faceLatencyMs,
-            String error
+            String error,
+
+            /* The proposed rule's verdict on identical inputs. Never feeds the live path. */
+            ProposedDecision proposed
     ) {
     }
 
@@ -166,10 +192,54 @@ public final class EvaluationDtos {
             Map<String, Long> ocrOutcomeCounts,
             long similarityPassedCount,
 
+            /* APPROVE / REVIEW / REJECT counts under the proposed rule, for the review-load figure. */
+            Map<String, Long> proposedDecisionCounts,
+
             /* Set when the run stopped early - currently only on a credentials failure. */
             String abortedReason,
 
             List<SampleResult> results
+    ) {
+    }
+
+    /**
+     * Live state of the most recent batch run, returned by {@code GET /api/v2/evaluate/progress}.
+     *
+     * <p>Carries the pre-formatted {@code elapsedText} and {@code etaText} beside their raw
+     * millisecond values so the console can render a duration without reimplementing the h:mm:ss
+     * rules, while still having the numbers available for anything that needs to compute on them.
+     */
+    public record ProgressSnapshot(
+            String runId,
+            String corpusDir,
+            boolean dryRun,
+
+            /* RUNNING | COMPLETE | ABORTED. */
+            String state,
+
+            /* Loop units: every sample directory the run will visit, skipped ones included. */
+            int samplesTotal,
+            int samplesDone,
+
+            int samplesProcessed,
+            int samplesFailed,
+            int samplesSkipped,
+
+            double percentComplete,
+
+            /* The sample currently in the pipeline - names the culprit when a run appears stuck. */
+            String currentSample,
+
+            long elapsedMs,
+            String elapsedText,
+
+            /* Null until at least one sample has been timed: unknown, not zero. */
+            Long etaMs,
+            String etaText,
+
+            Long averageSampleMs,
+
+            String abortedReason
     ) {
     }
 }

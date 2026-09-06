@@ -2,8 +2,12 @@ package lk.cf.fr.monolith.evaluation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lk.cf.fr.monolith.analysis.RegistrationAnalysisService;
+import lk.cf.fr.monolith.decision.DecisionOutcome;
+import lk.cf.fr.monolith.decision.DependencyAwareDecisionService;
+import lk.cf.fr.monolith.decision.EvidenceGroup;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.BatchRequest;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.BatchSummary;
+import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.ProposedDecision;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.SampleLabels;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.SampleResult;
 import lk.cf.fr.monolith.persistence.entity.RegistrationRecord;
@@ -91,8 +95,10 @@ public class BatchEvaluationService {
     private static final String EVAL_ACTION_TYPE = "EVALUATION";
 
     private final RegistrationAnalysisService registrationAnalysisService;
+    private final DependencyAwareDecisionService dependencyAwareDecisionService;
     private final RegistrationRecordRepository registrationRecordRepository;
     private final ObjectMapper objectMapper;
+    private final EvaluationProgressTracker progressTracker;
 
     @Value("${evaluation.corpus-root:./data}")
     private String corpusRoot;
@@ -107,6 +113,9 @@ public class BatchEvaluationService {
 
     @Value("${verification.liveness-confidence-threshold:65}")
     private Double livenessThreshold;
+
+    @Value("${verification.binding-threshold:0.80}")
+    private Double bindingThreshold;
 
     public BatchSummary run(BatchRequest request) {
         long start = System.currentTimeMillis();
@@ -125,6 +134,11 @@ public class BatchEvaluationService {
         log.info("[Evaluation] runId={} corpus={} samplesFound={} processing={} dryRun={}",
                 runId, corpus, found, samples.size(), request.isDryRun());
 
+        // Published before the first sample so a client polling /api/v2/evaluate/progress sees
+        // 0% of a known total straight away, rather than a 404 for the first several seconds.
+        EvaluationProgressTracker.RunProgress progress =
+                progressTracker.begin(runId, corpus.toString(), samples.size(), request.isDryRun());
+
         List<SampleResult> results = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         int failed = 0;
@@ -139,8 +153,12 @@ public class BatchEvaluationService {
             // problem and still surfaces as an error below.
             if (!looksLikeSample(sampleDir)) {
                 skipped.add(sampleId);
+                progress.sampleSkipped();
                 continue;
             }
+
+            progress.startSample(sampleId);
+            long sampleStart = System.currentTimeMillis();
 
             try {
                 SampleResult result = request.isDryRun()
@@ -150,7 +168,21 @@ public class BatchEvaluationService {
                 if (result.error() != null) {
                     failed++;
                 }
-            } catch (Exception e) {
+                progress.sampleFinished(result.error() != null, System.currentTimeMillis() - sampleStart);
+            } catch (Throwable e) {
+                // Throwable, not Exception. A corpus run is long and unattended, and the failures
+                // that actually end one are not all Exceptions: a NoClassDefFoundError left by a
+                // partial build killed a 53-sample run after three paid Rekognition calls, because
+                // an Exception-only handler never saw it. One bad sample should cost one sample,
+                // never the whole run.
+                //
+                // VirtualMachineError is the deliberate exception. Once the heap or the stack is
+                // gone every remaining sample fails the same way and no bookkeeping here can be
+                // trusted, so let it end the run rather than logging 50 more of itself.
+                if (e instanceof VirtualMachineError vme) {
+                    progress.finish("Run ended by " + vme.getClass().getSimpleName());
+                    throw vme;
+                }
                 failed++;
                 String message = rootMessage(e);
 
@@ -162,13 +194,17 @@ public class BatchEvaluationService {
                     log.error("[Evaluation] runId={} ABORTED at sample={}: {}", runId, sampleId, abortedReason);
                     log.debug("[Evaluation] underlying credential failure", e);
                     results.add(errorResult(sampleId, summarise(message)));
+                    progress.sampleFinished(true, System.currentTimeMillis() - sampleStart);
                     break;
                 }
 
                 log.error("[Evaluation] runId={} sample={} failed", runId, sampleId, e);
                 results.add(errorResult(sampleId, summarise(message)));
+                progress.sampleFinished(true, System.currentTimeMillis() - sampleStart);
             }
         }
+
+        progress.finish(abortedReason);
 
         if (!skipped.isEmpty()) {
             log.info("[Evaluation] runId={} skipped {} directory/directories with none of the required "
@@ -192,12 +228,15 @@ public class BatchEvaluationService {
                 countBy(results, SampleResult::bindingOutcome),
                 countBy(results, SampleResult::ocrOutcome),
                 results.stream().filter(SampleResult::similarityPassed).count(),
+                countBy(results, r -> r.proposed() == null ? null : r.proposed().decision()),
                 abortedReason,
                 results);
 
-        log.info("[Evaluation] runId={} complete: processed={} failed={} skipped={} durationMs={} binding={}",
+        log.info("[Evaluation] runId={} complete: processed={} failed={} skipped={} durationMs={} "
+                        + "binding={} proposedRule={}",
                 runId, summary.samplesProcessed(), summary.samplesFailed(), summary.samplesSkipped(),
-                summary.totalDurationMs(), summary.bindingOutcomeCounts());
+                summary.totalDurationMs(), summary.bindingOutcomeCounts(),
+                summary.proposedDecisionCounts());
 
         return summary;
     }
@@ -225,7 +264,14 @@ public class BatchEvaluationService {
                 labels == null ? null : labels.getMockSimilarity());
 
         LivenessOutcome liveness = toLiveness(labels);
-        RegistrationAnalysisService.GateResult gate = registrationAnalysisService.evaluateGate(faces, liveness);
+        RegistrationAnalysisService.GateResult gate =
+                registrationAnalysisService.evaluateGate(faces, liveness, document.binding());
+
+        // The proposed rule, over the identical inputs the baseline just consumed. Computed here
+        // rather than inside the analysis service so that the live registration path cannot reach
+        // it even by accident: the baseline must stay the frozen control condition.
+        DecisionOutcome proposed =
+                dependencyAwareDecisionService.decide(faces, liveness, document.binding());
 
         if (persistEvidence) {
             persistAttempt(analysisRef, claimedNic, labels, document, faces, liveness, gate);
@@ -271,7 +317,42 @@ public class BatchEvaluationService {
 
                 document.latencyMs(),
                 faces.latencyMs(),
-                null);
+                null,
+                toProposed(proposed));
+    }
+
+    /**
+     * Flatten the group verdicts into the shape the results table carries.
+     *
+     * <p>Group lookup is by name rather than by position so that adding a group to the rule does
+     * not silently shift every column one place to the left in an existing analysis notebook.
+     */
+    private static ProposedDecision toProposed(DecisionOutcome outcome) {
+        if (outcome == null) {
+            return null;
+        }
+        Map<String, EvidenceGroup> byName = outcome.groups().stream()
+                .collect(Collectors.toMap(EvidenceGroup::name, g -> g, (a, b) -> a, LinkedHashMap::new));
+
+        return new ProposedDecision(
+                outcome.decision().name(),
+                outcome.driverNames(),
+                outcome.reason(),
+                stateOf(byName, "DOCUMENT_PORTRAIT"), scoreOf(byName, "DOCUMENT_PORTRAIT"),
+                stateOf(byName, "CO_PRESENCE"), scoreOf(byName, "CO_PRESENCE"),
+                stateOf(byName, "CHANNEL_AGREEMENT"), scoreOf(byName, "CHANNEL_AGREEMENT"),
+                stateOf(byName, "IDENTITY_BINDING"), scoreOf(byName, "IDENTITY_BINDING"),
+                stateOf(byName, "LIVENESS"), scoreOf(byName, "LIVENESS"));
+    }
+
+    private static String stateOf(Map<String, EvidenceGroup> groups, String name) {
+        EvidenceGroup group = groups.get(name);
+        return group == null ? null : group.state().name();
+    }
+
+    private static Double scoreOf(Map<String, EvidenceGroup> groups, String name) {
+        EvidenceGroup group = groups.get(name);
+        return group == null ? null : group.score();
     }
 
     /** Dry run: resolve and report the labels without spending a single Rekognition call. */
@@ -292,7 +373,8 @@ public class BatchEvaluationService {
                 null, null, null, null, null, null, null, null, null, null,
                 null, null,
                 false, false, false, null, null, false, null, null, 0, 0,
-                missing.isEmpty() ? null : "Missing required file(s): " + missing);
+                missing.isEmpty() ? null : "Missing required file(s): " + missing,
+                null);
     }
 
     /**
@@ -376,6 +458,8 @@ public class BatchEvaluationService {
 
         record.setSimilarityThreshold(similarityThreshold);
         record.setLivenessThreshold(livenessThreshold);
+        record.setNicBindingThreshold(bindingThreshold);
+        record.setNicBindingGated(gate.bindingGated());
         record.setFailureReason(gate.failureReason());
         record.setImagesUploadedToS3(false);
 
@@ -565,7 +649,12 @@ public class BatchEvaluationService {
                 .append("cmp3Match,cmp3Similarity,cmp4Match,cmp4Similarity,cmp5Match,cmp5Similarity,")
                 .append("crossChannelStatus,crossChannelDelta,")
                 .append("nicCardCropped,selfNicCardCropped,scannedNicCardCropped,livenessScore,livenessPassed,")
-                .append("similarityPassed,allPassed,failureReason,documentLatencyMs,faceLatencyMs,error\n");
+                .append("similarityPassed,allPassed,failureReason,documentLatencyMs,faceLatencyMs,error,")
+                // The proposed rule. Both verdicts sit on one row so a paired test needs no join.
+                .append("proposedDecision,proposedDrivers,proposedReason,")
+                .append("gDocumentPortraitState,gDocumentPortraitScore,gCoPresenceState,gCoPresenceScore,")
+                .append("gChannelAgreementState,gChannelAgreementScore,")
+                .append("gIdentityBindingState,gIdentityBindingScore,gLivenessState,gLivenessScore\n");
 
         for (SampleResult r : results) {
             csv.append(String.join(",",
@@ -581,7 +670,14 @@ public class BatchEvaluationService {
                     String.valueOf(r.scannedNicCardCropped()),
                     n(r.livenessScore()), n(r.livenessPassed()),
                     String.valueOf(r.similarityPassed()), n(r.allPassed()), q(r.failureReason()),
-                    String.valueOf(r.documentLatencyMs()), String.valueOf(r.faceLatencyMs()), q(r.error())))
+                    String.valueOf(r.documentLatencyMs()), String.valueOf(r.faceLatencyMs()), q(r.error()),
+                    q(p(r, ProposedDecision::decision)), q(p(r, ProposedDecision::drivers)),
+                    q(p(r, ProposedDecision::reason)),
+                    q(p(r, ProposedDecision::documentPortraitState)), n(pd(r, ProposedDecision::documentPortraitScore)),
+                    q(p(r, ProposedDecision::coPresenceState)), n(pd(r, ProposedDecision::coPresenceScore)),
+                    q(p(r, ProposedDecision::channelAgreementState)), n(pd(r, ProposedDecision::channelAgreementScore)),
+                    q(p(r, ProposedDecision::identityBindingState)), n(pd(r, ProposedDecision::identityBindingScore)),
+                    q(p(r, ProposedDecision::livenessState)), n(pd(r, ProposedDecision::livenessGroupScore))))
                     .append("\n");
         }
         return csv.toString();
@@ -609,6 +705,17 @@ public class BatchEvaluationService {
         return raw.replaceAll("[^A-Za-z0-9._-]", "_");
     }
 
+    /** Read a field off a possibly-absent proposed verdict without repeating the null check. */
+    private static String p(SampleResult r,
+                           java.util.function.Function<ProposedDecision, String> field) {
+        return r.proposed() == null ? null : field.apply(r.proposed());
+    }
+
+    private static Double pd(SampleResult r,
+                             java.util.function.Function<ProposedDecision, Double> field) {
+        return r.proposed() == null ? null : field.apply(r.proposed());
+    }
+
     /** CSV-quote a nullable string. */
     private static String q(String value) {
         if (value == null) {
@@ -627,6 +734,6 @@ public class BatchEvaluationService {
                 null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null,
                 null, null,
-                false, false, false, null, null, false, null, null, 0, 0, message);
+                false, false, false, null, null, false, null, null, 0, 0, message, null);
     }
 }

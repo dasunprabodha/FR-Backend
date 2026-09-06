@@ -10,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Map;
@@ -49,6 +50,22 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException e) {
         return ResponseEntity.badRequest().body(Map.of("status", false, "message", e.getMessage()));
+    }
+
+    /**
+     * Without this, an oversized {@code scannedNIC} upload reaches the generic {@code Exception}
+     * handler below and is reported as HTTP 500 "An unexpected error occurred." - which tells the
+     * operator nothing and looks like a server fault rather than a file they can re-save smaller.
+     * Thrown by the servlet container while parsing the multipart body, so it happens before
+     * {@code RegistrationController} runs and cannot be handled at the call site.
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<Map<String, Object>> handleUploadTooLarge(MaxUploadSizeExceededException e) {
+        log.warn("[Upload] rejected oversized multipart upload: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(Map.of(
+                "status", false,
+                "message", "The uploaded file is too large. The maximum accepted size is 10MB - "
+                        + "please re-save the scan at a smaller size or lower resolution and try again."));
     }
 
     /**

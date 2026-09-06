@@ -1,6 +1,7 @@
 package lk.cf.fr.monolith.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lk.cf.fr.monolith.image.RekognitionImageNormaliser;
 import lk.cf.fr.monolith.registration.dto.RegistrationRequest;
 import lk.cf.fr.monolith.registration.dto.RegistrationResponse;
 import lk.cf.fr.monolith.registration.service.RegistrationService;
@@ -41,7 +42,15 @@ public class RegistrationController {
             @RequestParam(value = "scannedNIC", required = false) MultipartFile scannedNic) throws Exception {
 
         RegistrationRequest request = objectMapper.readValue(dataJson, RegistrationRequest.class);
-        byte[] scannedNicBytes = (scannedNic != null && !scannedNic.isEmpty()) ? scannedNic.getBytes() : null;
+
+        // Normalised at the boundary rather than at the Rekognition call sites: these same bytes
+        // reach DetectText (NIC OCR), CardDetectorService's crop, and CompareFaces (comparison 4),
+        // so converting once here keeps all three from having to care about the upload's container
+        // format - and turns an unsupported upload into a 400 naming the format, instead of an
+        // opaque InvalidImageFormatException raised several layers down.
+        byte[] scannedNicBytes = (scannedNic != null && !scannedNic.isEmpty())
+                ? RekognitionImageNormaliser.normalise(scannedNic.getBytes(), "scannedNIC")
+                : null;
 
         RegistrationResponse response = registrationService.startRegistration(request, scannedNicBytes);
         return ResponseEntity.ok(response);

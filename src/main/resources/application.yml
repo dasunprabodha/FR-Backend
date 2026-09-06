@@ -9,6 +9,18 @@ spring:
   config:
     import: "optional:file:./application-local.yml"
 
+  servlet:
+    multipart:
+      # Spring Boot's default is 1MB, which rejected ordinary phone/scanner captures of a NIC
+      # before they ever reached the controller. Sized against the downstream limit rather than
+      # picked arbitrarily: Rekognition caps inline image bytes at 5MB, and
+      # RekognitionImageNormaliser downscales anything above that, so accepting up to 10MB lets a
+      # typical 4-8MB phone photo through and be shrunk to fit instead of being refused outright.
+      max-file-size: 10MB
+      # Covers the whole request: the scannedNIC part plus the JSON "data" part and the multipart
+      # framing, so it must sit above max-file-size or a max-size file would still be rejected.
+      max-request-size: 12MB
+
   datasource:
     # File-based (not jdbc:h2:mem:) so registration/approval data survives an app restart - the
     # database lives at ./data/frverify.mv.db. data.sql is written with MERGE INTO (not plain
@@ -58,6 +70,53 @@ verification:
   # re-check at 70 - see VERIFICATION_PATH_ARCHITECTURE.md section 9/§28 Q5).
   similarity-threshold: 80
   liveness-confidence-threshold: 65
+
+  # --- Identity binding: the OCR'd document number vs. the NIC the applicant claimed -----------
+  #
+  # Single source of truth. Both the gate (RegistrationAnalysisService) and the evidence panel
+  # (DecisionExplanationService) read these, so the panel can never report a threshold the
+  # decision did not actually use.
+  #
+  # binding-gated=false is the FROZEN BASELINE (ablation rung B0): binding is measured, persisted
+  # and explained, but excluded from the pass/fail rule. Keep it false until the baseline has been
+  # recorded on a labelled corpus - once the live rule includes binding there is nothing left to
+  # compare the proposed rule against, and the Evidence Dashboard's rule-comparison panel loses
+  # the contrast it exists to show.
+  #
+  # Set to true for ablation rung B3, or once the baseline is frozen and you want the deployed
+  # system to actually catch the mismatched-document attack.
+  binding-gated: false
+
+  # When binding IS gated, does missing evidence (no scan uploaded, or OCR read no NIC-shaped
+  # number) count as a failure?
+  #
+  # false mirrors how comparison 4 already behaves - absent evidence is skipped, not failed - so
+  # turning binding-gated on does not silently make the scanned document mandatory.
+  #
+  # true closes the withheld-evidence hole: an attacker cannot evade the number check simply by
+  # declining to upload a scan. It also makes the scan effectively required for auto-approval,
+  # which is a real product decision, not just a threshold tweak. Measure it both ways.
+  binding-required: false
+
+  # Bottom of the positive match band in IdentityBindingService (EXACT 1.00 / CONFUSION 0.85 /
+  # FORMAT 0.80), so "bound" means "bound by one of the three positive outcomes".
+  binding-threshold: 0.80
+
+  # --- Proposed rule: margin bands for the three-way decision ----------------------------------
+  #
+  # Half-width of the band around each threshold inside which a measurement is treated as too close
+  # to call, sending the sample to REVIEW instead of forcing it to a side. This is what makes the
+  # rule magnitude-aware: the baseline reduces every comparison to a boolean at the cutoff, so a
+  # score of 80.1 and one of 99.9 are indistinguishable to it.
+  #
+  # FIXED BEFORE ANY CORPUS WAS ANALYSED, and deliberately not tuned per dataset. A review band
+  # fitted to the data it is then evaluated on measures nothing. If these change, the experiment
+  # changes, and the previous results are no longer comparable - so treat an edit here as a
+  # protocol amendment and re-run every arm, not as a tweak.
+  decision:
+    similarity-margin: 5.0
+    binding-margin: 0.10
+    liveness-margin: 10.0
 
   device-image-timeout-seconds: 120
   liveness-wait-timeout-seconds: 60
@@ -159,9 +218,9 @@ aws:
   # and that commit reached the remote. Those credentials must be treated as disclosed and
   # rotated regardless of them having since expired.
   # ---------------------------------------------------------------------------
-  access-key: "ASIARQTU3F4GBP2I5TAH"
-  secret-key: "jTNo59kkULO4OzWln5F/tqRDsircrqySmDhoMtDg"
-  session-token: "IQoJb3JpZ2luX2VjEE0aCXVzLWVhc3QtMSJGMEQCIGoZc49ZXkTdtNfvNplWcpqifJ7B4Vwe33K8fjoSmygvAiAAmRjco1iLSpFWRTuvngz7qJT+NlkPtO3xan8wmuccUyrIAwgWEAAaDDEwNDM5ODAwODA3NiIMhFF+mbcRruN+2QMKKqUDm9+m/pfJoJiuQTFeOG2lFruaxKGIcKaXSJ0dPGKwl8/PmlrhyUGUpRLzTIUWW4A9ooo3hTGyoX/moL6EsAa5s81YUAV2QOXlebrLxasgRGwokRLeqtLFAul2epHKVd6/iC8jpfOHrHmGnsumdW2e99tB0DK9NdK8/MUJZ3Io8GGwZhkMRbllreqCkYfSbHXONCx8TRvYl5yllOiFUk3xvSvmFq1eh9CCrG1KPm+VTYfmaAyTuOIDCzjXX+qZEUVOE4rOwbRXYfsOi8/CDw+KTieJmgqgcsCHGUoEgOeHZlva20YEJzEG1LsNzo/oGKVdajr1CMgE6l0pCokfqPAovOMsrakvXkTxKut85K4ncxBBkO/ywsAVeil/THmNBLbS2/tUpGPVWuOJe/7QiB7oZ6NTL2+8RFLMpPMkkkzw3XLE0gJknGuw0Q5Kuh0TdrEGu2nLOUPw4ilwm5G4Ob647FHJP0XkCx0wpH66USd3goT7qnv8hN/cge71cLQNj29DrFj/1+88hfdHuObM15knzNBVO4WBvW+libKv3cUGQ8b3blUNezD43rnUBjqpAaslkMmlH6OrtEntwtm7PoUWSU+kUTfsYyP3QyAKJzu996lMOjN2aIiGB90JqiSfVGu9qEk33amBhUEftl7PZe13XzstHSX1dKuIhNg4S39ln+Oe/MmNpuFN/Sp8Zc27fIEAE8iMy2YFxLe6m+cxxuqVMOO1Pno2Oca/Mm1WvHPFvsNFezjZ0XB2Ig7oBYYkvh3xXVe4sltnGDs2vA0WQIKpbcgyMAzDnU0="
+  access-key: "ASIARQTU3F4GHUD625NB"
+  secret-key: "zXl7vYFFUQ+3XOx9eZHJZ0L+xE6TN1OqUdIFacuA"
+  session-token: "IQoJb3JpZ2luX2VjEEoaCXVzLWVhc3QtMSJIMEYCIQDl9hpqW7VoHE4UF3izCaBaXpxlATP8dP0oiNMTYRFs4QIhALynDsqAQOQq5Bz+ibq7D6mGsPpeQcPOh9oZ7ZHrKDllKsgDCBIQABoMMTA0Mzk4MDA4MDc2IgxmQXFu0BCs4TjhBtYqpQOpzqnaS9vZkvuIwhktdDRJyvR/O6OnQbzzrqYWmEt0lwAZ+8mAtjeRePUqgQ++Dchw0NqF6l4cvogLdKgbAgZnTIgwQ/fptpXVXD1Bf6wGbvvJ+OVTHtJqoTJkoiuITiACiMfyJcy/z27jrXw7hYKKbQp/d5+gNtLey1uj5OfteEvbnhx9k1SgpODi99bSo0JfGdrH/UAxqCAxj5DGVoGvR0I3Qw5Q6TsGngQs2Qla0VBDVyQVI8cmibeqg9R94CTRvw67QAk8cdnNvzAxpuc/18ROEMv6zAqyXmB/6EE72XREyYVETF5+H4fNBpebYChowIvULe+R+Qtmfb14okyY0UTX+5YlZDqA74lztSSukB1VUV9kjA1aUaIreWN3jQ2+2f4KfndMscd0aBQ4huNOME71kjw56jDumBfPQBnmPKHNIRlzK0KruOuTYJPAAUf/55UZphoVLojsIB4cmhVjKkT1bk1qrIYjPO4wexTpO/uuNGFF1jeLPWTChFyW8Ky1zHy87wUzMSRQcrXHOuaPBzWJPV4JWPfzROgfXm9HlEoui7mQMM+Z8dQGOqcB8q69+iWknOGjM2bpz47GomfwIKdsuolh5fmpe6xkKIiXJ5x4JSBogn0BNwI/CBaTklsARZMAxnfXLhveYjYZzH/n5impWYGFdEdup+yfEvpWjxqKc2aGyc8sjTYjeq5klWynjjMNtAicXAtKN9rKvQG4eNFtVXJrNJi2SaEFj9bHTE7vH5X5GNG+PGRQqfamlq9VEMJDkjw36yobDTO40bba5ueSLCM="
 
   s3:
     # Bucket containing enrolled reference faces at FaceOnly/<nic>.jpg (see

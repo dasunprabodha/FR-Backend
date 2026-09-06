@@ -65,6 +65,8 @@ public record NicOcrResult(
         OLD_9_PLUS_LETTER,
         /** 12 digits (issued from 2016). */
         NEW_12_DIGIT,
+        /** 9 digits with no check letter - the letter was set apart on the card, or unread. */
+        OLD_9_NO_LETTER,
         /** No NIC-shaped number was read off the document. */
         NONE
     }

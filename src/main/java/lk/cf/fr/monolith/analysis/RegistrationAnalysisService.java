@@ -43,10 +43,22 @@ import org.springframework.stereotype.Service;
  * while the face comparisons can only run once all three captures are in hand. The batch path,
  * having every image up front, simply calls both in sequence.
  *
- * <p><b>The gate is unchanged.</b> {@link #evaluateGate} reproduces the original conjunctive rule
- * exactly, including comparison 1 being informational and comparison 4 being conditional on a
- * scanned NIC having been supplied. Identity binding is computed and returned but deliberately
- * left out of the gate, so the existing decision behaviour remains a valid frozen baseline.
+ * <h2>The gate, and the one switch on it</h2>
+ * <p>{@link #evaluateGate} reproduces the original conjunctive rule exactly - comparison 1
+ * informational, comparison 4 conditional on a scanned NIC having been supplied, liveness
+ * required - and adds identity binding as an <em>optional</em> conjunct controlled by
+ * {@code verification.binding-gated}.
+ *
+ * <p>That switch defaults to <b>false</b>, and the default is load-bearing. With it off, the
+ * decision behaviour is byte-identical to the rule this system shipped with, which is what makes
+ * that rule a legitimate frozen baseline rather than a strawman: the comparison is against real
+ * deployed behaviour, measured on the same attempts. Turn it on and the baseline is gone - there
+ * is no longer anything to compare the proposed rule against, and the Evidence Dashboard's
+ * rule-comparison panel has no contrast left to show.
+ *
+ * <p>So: record the baseline on a labelled corpus first, then flip the switch. Both rules are
+ * reachable by configuration alone, which is what lets an ablation run them over identical data
+ * without a code change between rungs.
  */
 @Service
 @Slf4j
@@ -67,6 +79,21 @@ public class RegistrationAnalysisService {
      */
     @Value("${analysis.cross-channel-tolerance:20}")
     private double crossChannelTolerance;
+
+    /**
+     * Whether identity binding participates in the gate. False is the frozen baseline (B0) and is
+     * the shipped default; see {@code application.yml} for why, and {@link #evaluateGate}.
+     */
+    @Value("${verification.binding-gated:false}")
+    private boolean bindingGated;
+
+    /** When gated, whether absent binding evidence counts as a failure rather than being skipped. */
+    @Value("${verification.binding-required:false}")
+    private boolean bindingRequired;
+
+    /** Bottom of the positive match band in {@code IdentityBindingService}. */
+    @Value("${verification.binding-threshold:0.80}")
+    private double bindingThreshold;
 
     /**
      * OCR the optionally-supplied scanned NIC and bind the number it carries to the claimed NIC.
@@ -235,33 +262,68 @@ public class RegistrationAnalysisService {
     }
 
     /**
-     * The frozen baseline decision rule, moved but not modified.
+     * The decision rule.
      *
      * <p>Comparison 1 (device NIC vs. live face) is informational and excluded from the gate;
      * comparison 4 only participates when a scanned NIC was actually supplied; liveness is a
-     * required conjunct. Identity binding is intentionally absent - see the class doc.
+     * required conjunct.
+     *
+     * <p><b>Identity binding participates only when {@code verification.binding-gated} is true.</b>
+     * The default is false, which reproduces the frozen baseline byte-for-byte - see the class doc
+     * for why that default matters. Flipping it is a one-line configuration change, not a code
+     * change, precisely so the two rules can be run against the same corpus and compared.
      *
      * @param liveness may be {@code null} in batch mode, where no device liveness session exists.
      *                 {@link GateResult#allPassed()} is then {@code null} - unknown, not failed -
      *                 while {@link GateResult#similarityPassed()} remains fully determined.
+     * @param binding  may be {@code null} when no document analysis ran at all. Treated exactly
+     *                 like {@code UNAVAILABLE}: no evidence, rather than negative evidence.
      */
-    public GateResult evaluateGate(FaceAnalysis faces, LivenessOutcome liveness) {
+    public GateResult evaluateGate(FaceAnalysis faces, LivenessOutcome liveness, IdentityBindingResult binding) {
         boolean similarityPassed = faces.cmp2().match()
                 && faces.cmp3().match()
                 && (faces.cmp4() == null || faces.cmp4().match());
 
+        Boolean bindingPassed = evaluateBinding(binding);
+
+        // Absent binding evidence is not a failure unless binding-required says so, mirroring the
+        // way an absent comparison 4 is skipped rather than failed.
+        boolean bindingBlocks = bindingGated && Boolean.FALSE.equals(bindingPassed);
+
         if (liveness == null) {
-            String reason = similarityPassed ? null : "LOW_SIMILARITY";
-            return new GateResult(similarityPassed, null, reason);
+            boolean passedSoFar = similarityPassed && !bindingBlocks;
+            return new GateResult(similarityPassed, null,
+                    passedSoFar ? null : buildFailureReason(similarityPassed, true, bindingBlocks, binding),
+                    bindingPassed, bindingGated);
         }
 
-        boolean allPassed = similarityPassed && liveness.passed();
-        return new GateResult(similarityPassed, allPassed, buildFailureReason(similarityPassed, liveness.passed()));
+        boolean allPassed = similarityPassed && liveness.passed() && !bindingBlocks;
+        return new GateResult(similarityPassed, allPassed,
+                buildFailureReason(similarityPassed, liveness.passed(), bindingBlocks, binding),
+                bindingPassed, bindingGated);
     }
 
-    /** Null when everything passed, otherwise the original comma-joined reason codes. */
-    private String buildFailureReason(boolean similarityPassed, boolean livenessPassed) {
-        if (similarityPassed && livenessPassed) {
+    /**
+     * Whether the document number binds to the claimed NIC.
+     *
+     * <p>Returns {@code null} for "no evidence either way" - the distinction
+     * {@link IdentityBindingResult} exists to preserve. A caller must not collapse that into
+     * false: a document whose number contradicts the claim is strong negative evidence, while a
+     * missing document is no evidence at all, and only the first should ever block on its own.
+     * When {@code binding-required} is set, missing evidence is mapped to false deliberately and
+     * reported under its own reason code.
+     */
+    private Boolean evaluateBinding(IdentityBindingResult binding) {
+        if (binding == null || !binding.hasEvidence()) {
+            return bindingRequired ? Boolean.FALSE : null;
+        }
+        return binding.score() != null && binding.score() >= bindingThreshold;
+    }
+
+    /** Null when everything passed, otherwise comma-joined reason codes. */
+    private String buildFailureReason(boolean similarityPassed, boolean livenessPassed,
+                                      boolean bindingBlocks, IdentityBindingResult binding) {
+        if (similarityPassed && livenessPassed && !bindingBlocks) {
             return null;
         }
         StringBuilder reason = new StringBuilder();
@@ -273,6 +335,15 @@ public class RegistrationAnalysisService {
                 reason.append(",");
             }
             reason.append("LIVENESS_FAILED");
+        }
+        if (bindingBlocks) {
+            if (reason.length() > 0) {
+                reason.append(",");
+            }
+            // Two distinct codes: a contradicted number and an absent one are different findings
+            // and an operator triaging the review queue needs to tell them apart.
+            reason.append(binding == null || !binding.hasEvidence()
+                    ? "BINDING_UNAVAILABLE" : "BINDING_MISMATCH");
         }
         return reason.toString();
     }
@@ -315,6 +386,16 @@ public class RegistrationAnalysisService {
         }
     }
 
-    public record GateResult(boolean similarityPassed, Boolean allPassed, String failureReason) {
+    /**
+     * @param bindingPassed whether the document number bound to the claimed NIC. {@code null}
+     *                      means no evidence either way - not a failure. Reported regardless of
+     *                      whether binding was gated, so an evaluation run can measure the rule
+     *                      that was not in force.
+     * @param bindingGated  whether binding actually participated in this decision. Snapshotted
+     *                      onto the attempt so an explanation rendered months later describes the
+     *                      rule that was applied, not the one currently configured.
+     */
+    public record GateResult(boolean similarityPassed, Boolean allPassed, String failureReason,
+                              Boolean bindingPassed, boolean bindingGated) {
     }
 }

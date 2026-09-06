@@ -40,6 +40,18 @@ public final class SriLankanNicFormat {
     public static final Pattern NEW_FORMAT = Pattern.compile("[0-9]{12}");
 
     /**
+     * Nine bare digits - an old-format number whose V/X check letter never reached us.
+     *
+     * <p>Rekognition returns the digit block and the check letter as separate LINE detections
+     * whenever the letter is set apart on the card, and on worn cards it frequently omits the
+     * letter altogether: a Sinhala-only 2013 card in this corpus returned {@code "970910409"} at
+     * 97.5% confidence with no letter anywhere in the response. Requiring the letter therefore
+     * discards a complete, high-confidence number over a character the OCR never had, which is
+     * why the letterless shape is recognised here as a lower-trust reading rather than not at all.
+     */
+    public static final Pattern OLD_FORMAT_NO_LETTER = Pattern.compile("[0-9]{9}");
+
+    /**
      * Uppercase and strip all whitespace. Rekognition sometimes splits the digit block and the
      * trailing check letter with a stray space or tab ("935560233 V"), so the shape regexes must
      * run against a whitespace-free string.
@@ -78,6 +90,23 @@ public final class SriLankanNicFormat {
     }
 
     /**
+     * True for nine bare digits whose day-of-year field is structurally possible.
+     *
+     * <p>The structure check is what keeps this from matching any nine-digit string that happens
+     * to appear on a document - a serial, an account number, a phone number without its leading
+     * zero. Positions 3-5 are the day of birth within the year, 001-366, with 500 added for
+     * female holders, so 367-500 and 867-999 are impossible and reject roughly a quarter of
+     * arbitrary nine-digit strings outright.
+     */
+    public static boolean isOldFormatWithoutCheckLetter(String compact) {
+        if (compact == null || !OLD_FORMAT_NO_LETTER.matcher(compact).matches()) {
+            return false;
+        }
+        int dayOfYear = Integer.parseInt(compact.substring(2, 5));
+        return (dayOfYear >= 1 && dayOfYear <= 366) || (dayOfYear >= 501 && dayOfYear <= 866);
+    }
+
+    /**
      * Convert an old-format number to its 12-digit equivalent:
      * {@code YY DDD SSSS + V/X}  ->  {@code 19YY DDD 0SSSS}.
      *
@@ -109,7 +138,24 @@ public final class SriLankanNicFormat {
         if (isNewFormat(compact)) {
             return compact;
         }
-        return oldToNew(compact);
+        String fromOld = oldToNew(compact);
+        return fromOld != null ? fromOld : oldToNewWithoutCheckLetter(compact);
+    }
+
+    /**
+     * Convert a letterless nine-digit reading to its 12-digit equivalent. The check letter plays
+     * no part in {@link #oldToNew(String)} - it is dropped, not used - so a number read without
+     * it canonicalises to exactly the same 12 digits as the same number read with it. That is
+     * what lets a letterless OCR reading bind against a claimed NIC written in either format.
+     *
+     * @return the 12-digit equivalent, or {@code null} if the input is not a plausible letterless
+     *         old-format number.
+     */
+    public static String oldToNewWithoutCheckLetter(String compact) {
+        if (!isOldFormatWithoutCheckLetter(compact)) {
+            return null;
+        }
+        return "19" + compact.substring(0, 2) + compact.substring(2, 5) + "0" + compact.substring(5, 9);
     }
 
     /**

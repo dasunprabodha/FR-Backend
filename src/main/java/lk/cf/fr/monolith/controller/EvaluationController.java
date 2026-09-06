@@ -1,12 +1,15 @@
 package lk.cf.fr.monolith.controller;
 
 import lk.cf.fr.monolith.evaluation.BatchEvaluationService;
+import lk.cf.fr.monolith.evaluation.EvaluationProgressTracker;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.BatchRequest;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.BatchSummary;
+import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.ProgressSnapshot;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,6 +38,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class EvaluationController {
 
     private final BatchEvaluationService batchEvaluationService;
+    private final EvaluationProgressTracker progressTracker;
 
     /**
      * Analyse every sample directory under {@code corpusDir}.
@@ -51,5 +55,22 @@ public class EvaluationController {
         log.info("[Evaluation] Batch requested corpusDir={} runId={} limit={} dryRun={}",
                 effective.getCorpusDir(), effective.getRunId(), effective.getLimit(), effective.isDryRun());
         return ResponseEntity.ok(batchEvaluationService.run(effective));
+    }
+
+    /**
+     * How far along the current (or most recent) batch run is.
+     *
+     * <p>{@code /batch} blocks for the whole run, so this is deliberately a separate GET on a
+     * separate connection - it is the only way to see inside a run that is still going. Cheap
+     * enough to poll once a second: it reads counters already held in memory and touches neither
+     * the database nor AWS.
+     *
+     * <p>204 No Content when no run has started since the application booted - an empty state, not
+     * an error, so a watcher can poll while waiting for a run to be kicked off.
+     */
+    @GetMapping(value = "/progress", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ProgressSnapshot> progress() {
+        ProgressSnapshot snapshot = progressTracker.snapshot();
+        return snapshot == null ? ResponseEntity.noContent().build() : ResponseEntity.ok(snapshot);
     }
 }

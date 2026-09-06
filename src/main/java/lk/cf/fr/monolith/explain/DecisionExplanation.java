@@ -14,10 +14,11 @@ import java.util.List;
  * item sat to its threshold, and what minimal change would have flipped the decision. It should
  * never be described as explainable anti-spoofing.
  *
- * <p>The {@link #hypothetical()} block is the research payload. Identity binding is recorded but
- * deliberately excluded from the live decision rule, so the system can report - on real attempts -
- * what the outcome would have been had that evidence been gated. That is the baseline-versus-
- * proposed comparison, computed on the same attempt rather than argued in the abstract.
+ * <p>The {@link #hypothetical()} block is the research payload: the same attempt evaluated under
+ * both the rule that decided it and the other one, so the baseline-versus-proposed comparison is
+ * computed on real evidence rather than argued in the abstract. Which rule is which depends on
+ * {@code verification.binding-gated} at the time the attempt ran - the block carries its own
+ * labels so a panel never has to guess.
  */
 public record DecisionExplanation(
 
@@ -73,15 +74,28 @@ public record DecisionExplanation(
     }
 
     /**
-     * The same attempt evaluated under a rule that also gates identity binding - i.e. what the
-     * proposed decision layer would have done with evidence the deployed gate ignores.
+     * The same attempt evaluated under the <em>other</em> decision rule.
      *
-     * @param bindingGatedDecision  PASS | FAIL | UNCHANGED_NO_EVIDENCE
-     * @param differsFromActual     true when adding binding to the gate changes the outcome
-     * @param explanation           why it differs, or why it does not
+     * <p>Which rule that is depends on what was in force when the attempt ran, and the panel reads
+     * the labels off this record rather than assuming. When binding was not gated, the alternative
+     * is the binding-aware rule - what the proposed decision layer would have done with evidence
+     * the gate ignored. When binding <em>was</em> gated, the alternative is the conjunctive
+     * baseline without it, so the same panel keeps answering the same question in reverse: what
+     * did adding this evidence actually change?
+     *
+     * <p>The interesting case is unchanged either way - an attempt where the two rules disagree,
+     * shown on real evidence rather than argued in the abstract.
+     *
+     * @param actualRuleLabel       short name of the rule that decided this attempt
+     * @param alternativeRuleLabel  short name of the rule being compared against
+     * @param alternativeDecision   PASS | FAIL | UNCHANGED_NO_EVIDENCE
+     * @param differsFromActual     true when the two rules reach different outcomes
+     * @param explanation           why they differ, or why they do not
      */
     public record Hypothetical(
-            String bindingGatedDecision,
+            String actualRuleLabel,
+            String alternativeRuleLabel,
+            String alternativeDecision,
             boolean differsFromActual,
             Double bindingScore,
             Double bindingThreshold,

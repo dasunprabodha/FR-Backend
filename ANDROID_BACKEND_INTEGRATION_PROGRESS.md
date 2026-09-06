@@ -50,6 +50,12 @@ wait per `referenceId` at a time.
 - Verification: one `open-camera` (`flow:"verify"`, `tag:"faceImage"`).
 - Registration: three, in order — `tag:"nicImage"` (OCR-validated, retried up to
   `registration.nic-max-retries`, default 1 retry) → `tag:"faceImage"` → `tag:"selfImage"`.
+  All three additionally carry `data.mode`, exactly `"Auto"` or `"Manual"` — the capture mode the
+  teller picked for this registration. **Registration only**: the verification `open-camera` has
+  no `mode` key at all. `Manual` is the device's cue to show its manual capture button for that
+  step; `Auto` is the pre-existing automatic behaviour. Older callers that omit `mode` on
+  `POST /api/facial-auth` still get `"Auto"` (`registration/model/RegistrationMode`), so a device
+  build that ignores the field behaves exactly as before.
 
 It also pushes `{"type":"liveness-session-created","data":{"sessionId","referenceId"}}` once per
 flow (proactively, not as a reply to any client request).
@@ -148,7 +154,7 @@ whoever builds or tests the caller side)
 
 - **Connection URL**: `BuildConfig.FR_SERVER_WS_URL` (default `ws://10.0.2.2:8090/device/ws-endpoint`; override via Gradle property — see §7).
 - **Sequence — Verification**: `hello` (on connect) → backend pushes `open-camera{tag:"faceImage",flow:"verify"}` → device replies `image{referenceId,content}` → backend pushes `liveness-session-created{sessionId,referenceId}` → device runs AWS Amplify Face Liveness UI directly against AWS → device sends `liveness-finished`/`liveness-result{referenceId}` → backend resolves the real liveness outcome itself (mock config or AWS `GetFaceLivenessSessionResults`, **not** from the device's `passed`/`score` fields) → HTTP caller receives `VerificationResponse`.
-- **Sequence — Registration**: backend pushes `open-camera{tag:"nicImage"}` (device replies `image`; retried once on invalid OCR) → `open-camera{tag:"faceImage"}` → `open-camera{tag:"selfImage"}` → backend had already pushed `liveness-session-created` right at the start → device runs liveness UI (any time after the session is created) → device sends `liveness-finished`/`liveness-result{referenceId}` → HTTP caller receives `RegistrationResponse`.
+- **Sequence — Registration**: backend pushes `open-camera{tag:"nicImage",mode:"Auto"|"Manual"}` (device replies `image`; retried once on invalid OCR) → `open-camera{tag:"faceImage"}` → `open-camera{tag:"selfImage"}` → backend had already pushed `liveness-session-created` right at the start → device runs liveness UI (any time after the session is created) → device sends `liveness-finished`/`liveness-result{referenceId}` → HTTP caller receives `RegistrationResponse`.
 - **Message envelope**: `{type, timestamp(epoch ms), messageId(uuid), data:{...}}` on every message either direction; already produced by `WebSocketService.addWsSecurityFields()` for every outgoing message.
 
 ## 7. Configuration

@@ -145,7 +145,7 @@ class DecisionExplanationServiceTest {
         DecisionExplanation x = service.explain(r);
 
         assertTrue(x.passed(), "the deployed gate approves this attempt");
-        assertEquals("FAIL", x.hypothetical().bindingGatedDecision());
+        assertEquals("FAIL", x.hypothetical().alternativeDecision());
         assertTrue(x.hypothetical().differsFromActual(),
                 "adding binding to the rule must change this outcome - this is the whole comparison");
         assertTrue(x.hypothetical().explanation().contains("would have been rejected"));
@@ -156,11 +156,73 @@ class DecisionExplanationServiceTest {
     }
 
     @Test
+    @DisplayName("When binding IS gated, the comparison inverts: the baseline would have approved")
+    void gatedBindingComparesAgainstTheBaseline() {
+        RegistrationRecord r = passingRecord();
+        // Same attempt as above - genuine face, someone else's number - but decided under the
+        // binding-aware rule, so it was rejected rather than approved.
+        r.setStatus(RegistrationApprovalStatus.PENDING_APPROVAL.name());
+        r.setExtractedNicNumber("200155566677");
+        r.setNicBindingOutcome("MISMATCH");
+        r.setNicBindingScore(0.15);
+        r.setNicBindingEditDistance(9);
+        r.setNicBindingGated(true);
+        r.setNicBindingThreshold(0.80);
+        r.setFailureReason("BINDING_MISMATCH");
+
+        DecisionExplanation x = service.explain(r);
+
+        assertFalse(x.passed());
+        assertTrue(x.hypothetical().differsFromActual(),
+                "the shipped conjunctive rule would have approved this - that contrast is the point");
+        assertEquals("Deployed rule (with binding)", x.hypothetical().actualRuleLabel());
+        assertEquals("Without identity binding", x.hypothetical().alternativeRuleLabel());
+        assertTrue(x.hypothetical().explanation().contains("would have approved it"));
+
+        EvidenceItem binding = find(x, "identity.binding");
+        assertTrue(binding.gated(), "binding counted towards this decision and must say so");
+        assertEquals("FAIL", binding.status());
+        assertTrue(x.decisionRule().contains("must also bind to the claimed NIC"));
+    }
+
+    @Test
+    @DisplayName("A gated attempt that fails on faces too does not claim the baseline would differ")
+    void gatedBindingWithOtherFailuresDoesNotDiverge() {
+        RegistrationRecord r = passingRecord();
+        r.setStatus(RegistrationApprovalStatus.PENDING_APPROVAL.name());
+        r.setNicBindingOutcome("MISMATCH");
+        r.setNicBindingScore(0.15);
+        r.setNicBindingGated(true);
+        r.setNicBindingThreshold(0.80);
+        // The faces failed as well, so removing binding from the rule changes nothing.
+        r.setMatch3(false);
+        r.setThirdSimilarity(61.0);
+
+        DecisionExplanation x = service.explain(r);
+
+        assertFalse(x.hypothetical().differsFromActual(),
+                "the baseline would have rejected this too - claiming otherwise would overstate the finding");
+    }
+
+    @Test
+    @DisplayName("Historical rows predating the switch are still explained as ungated")
+    void rowsWithoutTheSnapshotAreTreatedAsUngated() {
+        RegistrationRecord r = passingRecord();
+        r.setNicBindingGated(null);
+
+        DecisionExplanation x = service.explain(r);
+
+        assertFalse(find(x, "identity.binding").gated(),
+                "binding was never gated when this row was written; saying otherwise rewrites history");
+        assertEquals("Deployed rule", x.hypothetical().actualRuleLabel());
+    }
+
+    @Test
     @DisplayName("Binding that succeeds does not change the outcome either way")
     void bindingMatchDoesNotDiverge() {
         DecisionExplanation x = service.explain(passingRecord());
 
-        assertEquals("PASS", x.hypothetical().bindingGatedDecision());
+        assertEquals("PASS", x.hypothetical().alternativeDecision());
         assertFalse(x.hypothetical().differsFromActual());
     }
 
@@ -177,7 +239,7 @@ class DecisionExplanationServiceTest {
 
         DecisionExplanation x = service.explain(r);
 
-        assertEquals("UNCHANGED_NO_EVIDENCE", x.hypothetical().bindingGatedDecision());
+        assertEquals("UNCHANGED_NO_EVIDENCE", x.hypothetical().alternativeDecision());
         assertFalse(x.hypothetical().differsFromActual());
         assertEquals("UNAVAILABLE", find(x, "identity.binding").status());
         assertTrue(x.hypothetical().explanation().contains("nothing ties"),

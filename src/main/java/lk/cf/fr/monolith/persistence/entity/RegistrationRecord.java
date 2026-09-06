@@ -100,6 +100,24 @@ public class RegistrationRecord {
     /** Levenshtein distance between the canonical claimed and extracted numbers. */
     private Integer nicBindingEditDistance;
 
+    /**
+     * Snapshot of verification.binding-threshold at the time this attempt ran.
+     *
+     * <p>Same reason as the similarity and liveness snapshots below: an explanation rendered later
+     * must report the threshold the decision actually used, not whatever configuration currently
+     * says. Null on rows written before binding carried a threshold.
+     */
+    private Double nicBindingThreshold;
+
+    /**
+     * Whether identity binding participated in this attempt's decision rule.
+     *
+     * <p>Null on rows written before the switch existed, which is correctly read as false: binding
+     * was never gated then. Without this snapshot, turning {@code verification.binding-gated} on
+     * would silently rewrite the history of every past attempt in the evidence panel.
+     */
+    private Boolean nicBindingGated;
+
     /** Mean Rekognition per-line OCR confidence (0-100) - a document-quality term for later fusion. */
     private Double ocrMeanLineConfidence;
 
