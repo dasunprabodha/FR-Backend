@@ -53,8 +53,50 @@ public record NicOcrResult(
         /* The classifier flags, retained so a decision can be explained without re-running OCR. */
         boolean nationalIdKeyword,
         boolean studentIdKeyword,
-        boolean drivingLicenseKeyword
+        boolean drivingLicenseKeyword,
+
+        /* Which image this reading came from. See {@link OcrSource}. */
+        OcrSource source
 ) {
+
+    /**
+     * Which image the number was read off.
+     *
+     * <p>This matters for reporting, not for the arithmetic. A number read from a flatbed-quality
+     * upload and a number read from a phone photograph of a card held at arm's length are not
+     * equally reliable, and an evaluation that pools them silently would overstate the fallback.
+     * Every result therefore carries its provenance so the two can be reported separately.
+     */
+    public enum OcrSource {
+        /** The officer-uploaded {@code scannedNIC} file - the original and preferred source. */
+        SCANNED_UPLOAD,
+        /** The device-captured {@code nicImage}, used only when no upload was supplied. */
+        DEVICE_CAPTURE,
+        /** No OCR ran. */
+        NONE
+    }
+
+    /**
+     * Backwards-compatible constructor for the call sites that predate {@link #source}. Everything
+     * that constructed a result before the fallback existed was, by definition, reading the
+     * uploaded scan, so that is the default rather than {@code NONE}.
+     */
+    public NicOcrResult(NicValidationOutcome outcome, String extractedNicNumber, String canonicalNicNumber,
+                        List<String> candidateNumbers, NicNumberFormat numberFormat,
+                        boolean digitCorrectionApplied, Double meanLineConfidence, Double minLineConfidence,
+                        List<DetectedLine> lines, boolean nationalIdKeyword, boolean studentIdKeyword,
+                        boolean drivingLicenseKeyword) {
+        this(outcome, extractedNicNumber, canonicalNicNumber, candidateNumbers, numberFormat,
+                digitCorrectionApplied, meanLineConfidence, minLineConfidence, lines,
+                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, OcrSource.SCANNED_UPLOAD);
+    }
+
+    /** Same reading, re-tagged with the image it actually came from. */
+    public NicOcrResult withSource(OcrSource newSource) {
+        return new NicOcrResult(outcome, extractedNicNumber, canonicalNicNumber, candidateNumbers,
+                numberFormat, digitCorrectionApplied, meanLineConfidence, minLineConfidence, lines,
+                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, newSource);
+    }
 
     /** One Rekognition {@code LINE} detection: the uppercased text and its confidence (0-100). */
     public record DetectedLine(String text, Double confidence) {
@@ -83,7 +125,7 @@ public record NicOcrResult(
      */
     public static NicOcrResult notProvided() {
         return new NicOcrResult(null, null, null, List.of(), NicNumberFormat.NONE, false,
-                null, null, List.of(), false, false, false);
+                null, null, List.of(), false, false, false, OcrSource.NONE);
     }
 
     /** Fallback for an OCR call that threw - same shape as {@code UNKNOWN}, no evidence carried. */
@@ -95,5 +137,10 @@ public record NicOcrResult(
     /** {@code outcome.name()}, or {@code "NOT_PROVIDED"} when no document was supplied. */
     public String statusName() {
         return outcome == null ? "NOT_PROVIDED" : outcome.name();
+    }
+
+    /** True when the number was recovered from the device capture rather than an upload. */
+    public boolean fromDeviceCapture() {
+        return source == OcrSource.DEVICE_CAPTURE;
     }
 }

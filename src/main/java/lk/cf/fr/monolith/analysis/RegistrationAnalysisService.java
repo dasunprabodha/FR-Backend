@@ -96,30 +96,74 @@ public class RegistrationAnalysisService {
     private double bindingThreshold;
 
     /**
-     * OCR the optionally-supplied scanned NIC and bind the number it carries to the claimed NIC.
+     * Whether OCR falls back to the device-captured card when no scan was uploaded.
+     *
+     * <p>False is the frozen baseline: with no upload there is no OCR, so identity binding reports
+     * itself UNAVAILABLE and the claimed number is never checked against any document at all. That
+     * is the gap this flag closes - an applicant who simply declines to upload a scan currently
+     * defeats the strongest signal in the system by omission.
+     *
+     * <p>The fallback reads the same physical card the applicant held up to the camera, so the
+     * number is genuinely available; it is only the officer's upload that was missing. What it
+     * cannot do is preserve the cross-channel independence of the two document sources: with one
+     * image, the number and the card come from the same place, so comparison 5 has nothing to
+     * compare. That trade is the reason this is a switch rather than the default.
+     */
+    @Value("${document.ocr-fallback-to-capture:false}")
+    private boolean ocrFallbackToCapture;
+
+    /**
+     * OCR the supplied document and bind the number it carries to the claimed NIC.
+     *
+     * <p>Preference order is upload first, device capture second. The upload is preferred because
+     * it is the higher-quality image and because it is an independent second channel; the capture
+     * is used only when there is no upload, and only when
+     * {@code document.ocr-fallback-to-capture} is on.
      *
      * @param scannedNicBytes the uploaded document, or {@code null} if none was supplied
+     * @param deviceNicBytes  the card photographed by the device, used only as the fallback source
      */
     public DocumentAnalysis analyseDocument(String referenceId, String claimedNic,
-                                             byte[] scannedNicBytes, Boolean mockNicValid) {
+                                             byte[] scannedNicBytes, byte[] deviceNicBytes,
+                                             Boolean mockNicValid) {
         long start = System.currentTimeMillis();
 
-        if (scannedNicBytes == null) {
-            log.info("[Analysis][Document] referenceId={} nic={} no scannedNIC supplied -> NOT_PROVIDED (skipping OCR)",
-                    referenceId, claimedNic);
+        if (scannedNicBytes != null) {
+            log.info("[Analysis][Document] referenceId={} nic={} scannedNIC supplied ({} bytes) - running OCR",
+                    referenceId, claimedNic, scannedNicBytes.length);
+            return finish(referenceId, claimedNic,
+                    documentProcessingService.validateNic(scannedNicBytes, mockNicValid), start);
+        }
+
+        if (!ocrFallbackToCapture || deviceNicBytes == null) {
+            log.info("[Analysis][Document] referenceId={} nic={} no scannedNIC supplied -> NOT_PROVIDED "
+                            + "(fallback {}) ",
+                    referenceId, claimedNic, ocrFallbackToCapture ? "enabled but no device capture" : "disabled");
             NicOcrResult ocr = NicOcrResult.notProvided();
             return new DocumentAnalysis(ocr, identityBindingService.bind(claimedNic, ocr),
                     System.currentTimeMillis() - start);
         }
 
-        log.info("[Analysis][Document] referenceId={} nic={} scannedNIC supplied ({} bytes) - running OCR",
-                referenceId, claimedNic, scannedNicBytes.length);
+        // Crop first. OCR on the raw frame reads the room as well as the card, and the detector
+        // that already crops for the face comparisons answers exactly the question we need here.
+        // A failed crop falls back to the full frame rather than abandoning the read.
+        byte[] crop = cardDetectorService.cropCard(deviceNicBytes, "DeviceNIC-OCR", referenceId);
+        byte[] ocrInput = crop != null ? crop : deviceNicBytes;
+        log.info("[Analysis][Document] referenceId={} nic={} no scannedNIC - falling back to device capture "
+                        + "(crop {}, {} bytes)",
+                referenceId, claimedNic, crop != null ? "succeeded" : "FAILED, using full frame", ocrInput.length);
 
-        NicOcrResult ocr = documentProcessingService.validateNic(scannedNicBytes, mockNicValid);
+        NicOcrResult ocr = documentProcessingService.validateNic(ocrInput, mockNicValid)
+                .withSource(NicOcrResult.OcrSource.DEVICE_CAPTURE);
+        return finish(referenceId, claimedNic, ocr, start);
+    }
+
+    private DocumentAnalysis finish(String referenceId, String claimedNic, NicOcrResult ocr, long start) {
         IdentityBindingResult binding = identityBindingService.bind(claimedNic, ocr);
 
-        log.info("[Analysis][Document] referenceId={} outcome={} extractedNic={} binding={} score={}",
-                referenceId, ocr.statusName(), ocr.extractedNicNumber(), binding.outcome(), binding.score());
+        log.info("[Analysis][Document] referenceId={} source={} outcome={} extractedNic={} binding={} score={}",
+                referenceId, ocr.source(), ocr.statusName(), ocr.extractedNicNumber(),
+                binding.outcome(), binding.score());
 
         return new DocumentAnalysis(ocr, binding, System.currentTimeMillis() - start);
     }
@@ -397,5 +441,23 @@ public class RegistrationAnalysisService {
      */
     public record GateResult(boolean similarityPassed, Boolean allPassed, String failureReason,
                               Boolean bindingPassed, boolean bindingGated) {
+
+        /** True when binding was gated and refused the claim - the conjunct that blocked it. */
+        public boolean bindingBlocked() {
+            return bindingGated && Boolean.FALSE.equals(bindingPassed);
+        }
+
+        /**
+         * The gate's verdict with liveness set aside.
+         *
+         * <p>{@link #allPassed()} is null whenever there is no liveness channel, which is every
+         * sample in an offline replay. Reporting only {@link #similarityPassed()} in that case
+         * hides the binding conjunct entirely, so a reader of results.csv sees a gate that binding
+         * never touched and concludes it changed nothing. This is the honest column for a replay:
+         * everything the gate decided, minus the one input the replay cannot supply.
+         */
+        public boolean passedExcludingLiveness() {
+            return similarityPassed && !bindingBlocked();
+        }
     }
 }

@@ -35,9 +35,12 @@ class BatchCorpusScanTest {
      * would fail every test for reasons that have nothing to do with what is being tested.
      */
     private BatchEvaluationService serviceFor(Path root) {
+        EvaluationRunArchive archive = new EvaluationRunArchive(new ObjectMapper());
+        ReflectionTestUtils.setField(archive, "outputRoot", root.resolve("out").toString());
+
         BatchEvaluationService service = new BatchEvaluationService(
                 null, null, mock(RegistrationRecordRepository.class), new ObjectMapper(),
-                new EvaluationProgressTracker());
+                new EvaluationProgressTracker(), archive);
         ReflectionTestUtils.setField(service, "corpusRoot", root.toString());
         ReflectionTestUtils.setField(service, "outputRoot", root.resolve("out").toString());
         return service;
@@ -48,6 +51,33 @@ class BatchCorpusScanTest {
         for (String f : files) {
             Files.write(dir.resolve(f), new byte[] {1, 2, 3});
         }
+    }
+
+    @Test
+    @DisplayName("a real run leaves behind the metadata a reload needs")
+    void realRunWritesRunMeta(@TempDir Path root) throws IOException {
+        // Every capture present, so the sample is attempted rather than skipped. The analysis
+        // service is null here, so it fails immediately - which is fine: what is under test is
+        // that a finished run records the figures its rows cannot carry, not that it succeeded.
+        writeSample(root.resolve("corpus").resolve("subject-G01"),
+                "nicImage.jpg", "faceImage.jpg", "selfImage.jpg");
+
+        BatchRequest request = new BatchRequest();
+        request.setCorpusDir("corpus");
+        request.setDryRun(false);
+        request.setPersistEvidence(false);
+
+        BatchSummary summary = serviceFor(root).run(request);
+
+        Path meta = root.resolve("out").resolve(summary.runId()).resolve("run-meta.json");
+        assertTrue(Files.exists(meta), "run-meta.json must sit beside results.csv/json");
+
+        var written = new ObjectMapper().readTree(meta.toFile());
+        assertEquals(summary.runId(), written.get("runId").asText());
+        assertEquals(summary.corpusDir(), written.get("corpusDir").asText());
+        assertEquals(1, written.get("samplesFound").asInt());
+        assertTrue(written.get("totalDurationMs").asLong() >= 0);
+        assertFalse(written.get("completedAt").asText().isBlank(), "the archive lists runs by this");
     }
 
     @Test

@@ -165,7 +165,7 @@ public class RegistrationService {
         byte[] nicImage = capture(session, "nicImage", request.getPrefLang());
         session.setState(RegistrationState.DOCUMENT_VALIDATED);
 
-        validateScannedNic(session, request, scannedNicBytes);
+        validateScannedNic(session, request, scannedNicBytes, nicImage);
         // NicWaitingActivity on the device blocks on exactly this message shape (see
         // DeviceCommunicationService#notifyNicCheckResult) - without it the device sits until its
         // own 4-minute client-side timeout even though the backend has already moved on. Fired
@@ -313,14 +313,22 @@ public class RegistrationService {
     }
 
     /**
-     * OCR/document validation now runs only against the optionally-uploaded {@code scannedNIC}
-     * file, not the live device-captured {@code nicImage} - the device capture is used solely for
-     * face comparisons 1/2. No-op (leaves {@code validNicStatus} as {@code NOT_PROVIDED}) when no
-     * file was uploaded, since scannedNIC is optional.
+     * OCR/document validation runs against the uploaded {@code scannedNIC} file when there is one.
+     * When there is not, and {@code document.ocr-fallback-to-capture} is on, it falls back to the
+     * device-captured {@code nicImage} so the claimed number is still checked against a document.
+     *
+     * <p>The rejection branch below is deliberately still guarded on an upload having been
+     * supplied. A phone photograph of a card held at arm's length is a harder read than a flatbed
+     * scan, so letting a fallback {@code UNKNOWN} end the attempt would turn a missing upload into
+     * a refused registration - a regression for honest customers, in the name of a signal that is
+     * only meant to add evidence. The fallback therefore contributes identity binding and nothing
+     * else; it cannot itself reject anybody.
      */
-    private void validateScannedNic(RegistrationSession session, RegistrationRequest request, byte[] scannedNicBytes) {
+    private void validateScannedNic(RegistrationSession session, RegistrationRequest request,
+                                    byte[] scannedNicBytes, byte[] deviceNicBytes) {
         RegistrationAnalysisService.DocumentAnalysis document = registrationAnalysisService.analyseDocument(
-                session.getReferenceId(), session.getNic(), scannedNicBytes, request.getMockNicValid());
+                session.getReferenceId(), session.getNic(), scannedNicBytes, deviceNicBytes,
+                request.getMockNicValid());
 
         session.setDocumentAnalysis(document);
         session.setValidNicStatus(document.ocr().statusName());

@@ -138,6 +138,9 @@ public final class EvaluationDtos {
             String claimedNic,
 
             String ocrOutcome,
+
+            /* Which image the number was read off: SCANNED_UPLOAD, DEVICE_CAPTURE or NONE. */
+            String ocrSource,
             String extractedNic,
             Double ocrMeanLineConfidence,
 
@@ -164,6 +167,12 @@ public final class EvaluationDtos {
 
             boolean similarityPassed,
             Boolean allPassed,
+
+            /* Binding was gated and refused the claim. */
+            Boolean bindingBlocked,
+
+            /* similarityPassed AND binding - the gate minus liveness, which a replay cannot supply. */
+            Boolean gatePassedExLiveness,
             String failureReason,
 
             long documentLatencyMs,
@@ -209,8 +218,68 @@ public final class EvaluationDtos {
      * millisecond values so the console can render a duration without reimplementing the h:mm:ss
      * rules, while still having the numbers available for anything that needs to compute on them.
      */
+    /**
+     * One saved run as it appears in the archive picker - enough to choose between runs without
+     * opening any of them.
+     *
+     * <p>A run is only ever written to disk by a real (non-dry) batch, so everything listed here
+     * has results behind it.
+     */
+    public record RunListing(
+            String runId,
+
+            /* ISO-8601, from run-meta.json where present and the results file's timestamp otherwise. */
+            String savedAt,
+
+            /* Rows in the results file. Counted from the CSV when no meta file was written. */
+            int sampleCount,
+
+            /* Bytes on disk across the run's files - a rough proxy for how big the table will be. */
+            long sizeBytes,
+
+            boolean hasCsv,
+            boolean hasJson,
+
+            /*
+             * False for runs written before run-meta.json existed. Those still load - the summary
+             * is rebuilt from the rows - but corpus, duration and skipped count are unrecoverable.
+             */
+            boolean hasMeta
+    ) {
+    }
+
+    /**
+     * The parts of a {@link BatchSummary} that cannot be recovered from the result rows.
+     *
+     * <p>Written beside results.csv/json so a saved run reopens with the same header figures it
+     * showed when it finished. Everything else - the outcome counts, the pass count - is derived
+     * from the rows themselves and so is never stored twice.
+     */
+    public record RunMeta(
+            String runId,
+            String corpusDir,
+            int samplesFound,
+            int samplesProcessed,
+            int samplesFailed,
+            int samplesSkipped,
+            long totalDurationMs,
+            String abortedReason,
+
+            /* ISO-8601 local time the run finished. */
+            String completedAt
+    ) {
+    }
+
     public record ProgressSnapshot(
             String runId,
+
+            /*
+             * Monotonic per-JVM counter, incremented once per run. Run *names* are reused all the
+             * time - a corpus is re-run under the same name after a fix - so runId alone cannot
+             * tell a fresh run from the finished one still held by the tracker. This can.
+             */
+            long runSeq,
+
             String corpusDir,
             boolean dryRun,
 

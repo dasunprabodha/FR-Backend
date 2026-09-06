@@ -8,6 +8,7 @@ import lk.cf.fr.monolith.decision.EvidenceGroup;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.BatchRequest;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.BatchSummary;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.ProposedDecision;
+import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.RunMeta;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.SampleLabels;
 import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.SampleResult;
 import lk.cf.fr.monolith.persistence.entity.RegistrationRecord;
@@ -99,6 +100,7 @@ public class BatchEvaluationService {
     private final RegistrationRecordRepository registrationRecordRepository;
     private final ObjectMapper objectMapper;
     private final EvaluationProgressTracker progressTracker;
+    private final EvaluationRunArchive runArchive;
 
     @Value("${evaluation.corpus-root:./data}")
     private String corpusRoot;
@@ -232,6 +234,21 @@ public class BatchEvaluationService {
                 abortedReason,
                 results);
 
+        // Beside the results, so reopening this run later shows the same header figures it shows
+        // now. Only what the rows cannot reproduce is stored - see EvaluationRunArchive.
+        if (!request.isDryRun()) {
+            runArchive.writeMeta(outputDir, new RunMeta(
+                    runId,
+                    summary.corpusDir(),
+                    summary.samplesFound(),
+                    summary.samplesProcessed(),
+                    summary.samplesFailed(),
+                    summary.samplesSkipped(),
+                    summary.totalDurationMs(),
+                    summary.abortedReason(),
+                    LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)));
+        }
+
         log.info("[Evaluation] runId={} complete: processed={} failed={} skipped={} durationMs={} "
                         + "binding={} proposedRule={}",
                 runId, summary.samplesProcessed(), summary.samplesFailed(), summary.samplesSkipped(),
@@ -257,7 +274,7 @@ public class BatchEvaluationService {
         String analysisRef = "eval-" + runId + "-" + sampleId;
 
         RegistrationAnalysisService.DocumentAnalysis document =
-                registrationAnalysisService.analyseDocument(analysisRef, claimedNic, scannedNic, null);
+                registrationAnalysisService.analyseDocument(analysisRef, claimedNic, scannedNic, nicImage, null);
 
         RegistrationAnalysisService.FaceAnalysis faces = registrationAnalysisService.analyseFaces(
                 analysisRef, nicImage, faceImage, selfImage, scannedNic,
@@ -288,6 +305,7 @@ public class BatchEvaluationService {
                 claimedNic,
 
                 document.ocr().statusName(),
+                document.ocr().source() == null ? null : document.ocr().source().name(),
                 document.ocr().extractedNicNumber(),
                 document.ocr().meanLineConfidence(),
 
@@ -313,6 +331,8 @@ public class BatchEvaluationService {
 
                 gate.similarityPassed(),
                 gate.allPassed(),
+                gate.bindingBlocked(),
+                gate.passedExcludingLiveness(),
                 gate.failureReason(),
 
                 document.latencyMs(),
@@ -369,10 +389,11 @@ public class BatchEvaluationService {
                 labels == null ? null : labels.getLighting(),
                 claimedNic,
                 Files.exists(sampleDir.resolve(SCANNED_NIC)) ? "WOULD_RUN_OCR" : "NOT_PROVIDED",
+                null,
                 null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null,
                 null, null,
-                false, false, false, null, null, false, null, null, 0, 0,
+                false, false, false, null, null, false, null, null, null, null, 0, 0,
                 missing.isEmpty() ? null : "Missing required file(s): " + missing,
                 null);
     }
@@ -643,13 +664,13 @@ public class BatchEvaluationService {
     private String toCsv(List<SampleResult> results) {
         StringBuilder csv = new StringBuilder();
         csv.append("sampleId,analysisRef,subjectId,groundTruth,attackType,device,lighting,claimedNic,")
-                .append("ocrOutcome,extractedNic,ocrMeanLineConfidence,")
+                .append("ocrOutcome,ocrSource,extractedNic,ocrMeanLineConfidence,")
                 .append("bindingOutcome,bindingScore,bindingEditDistance,")
                 .append("cmp1Match,cmp1Similarity,cmp2Match,cmp2Similarity,")
                 .append("cmp3Match,cmp3Similarity,cmp4Match,cmp4Similarity,cmp5Match,cmp5Similarity,")
                 .append("crossChannelStatus,crossChannelDelta,")
                 .append("nicCardCropped,selfNicCardCropped,scannedNicCardCropped,livenessScore,livenessPassed,")
-                .append("similarityPassed,allPassed,failureReason,documentLatencyMs,faceLatencyMs,error,")
+                .append("similarityPassed,allPassed,bindingBlocked,gatePassedExLiveness,failureReason,documentLatencyMs,faceLatencyMs,error,")
                 // The proposed rule. Both verdicts sit on one row so a paired test needs no join.
                 .append("proposedDecision,proposedDrivers,proposedReason,")
                 .append("gDocumentPortraitState,gDocumentPortraitScore,gCoPresenceState,gCoPresenceScore,")
@@ -660,7 +681,7 @@ public class BatchEvaluationService {
             csv.append(String.join(",",
                     q(r.sampleId()), q(r.analysisRef()), q(r.subjectId()), q(r.groundTruth()), q(r.attackType()),
                     q(r.device()), q(r.lighting()), q(r.claimedNic()),
-                    q(r.ocrOutcome()), q(r.extractedNic()), n(r.ocrMeanLineConfidence()),
+                    q(r.ocrOutcome()), q(r.ocrSource()), q(r.extractedNic()), n(r.ocrMeanLineConfidence()),
                     q(r.bindingOutcome()), n(r.bindingScore()), n(r.bindingEditDistance()),
                     n(r.cmp1Match()), n(r.cmp1Similarity()), n(r.cmp2Match()), n(r.cmp2Similarity()),
                     n(r.cmp3Match()), n(r.cmp3Similarity()), n(r.cmp4Match()), n(r.cmp4Similarity()),
@@ -669,7 +690,8 @@ public class BatchEvaluationService {
                     String.valueOf(r.nicCardCropped()), String.valueOf(r.selfNicCardCropped()),
                     String.valueOf(r.scannedNicCardCropped()),
                     n(r.livenessScore()), n(r.livenessPassed()),
-                    String.valueOf(r.similarityPassed()), n(r.allPassed()), q(r.failureReason()),
+                    String.valueOf(r.similarityPassed()), n(r.allPassed()), n(r.bindingBlocked()),
+                    n(r.gatePassedExLiveness()), q(r.failureReason()),
                     String.valueOf(r.documentLatencyMs()), String.valueOf(r.faceLatencyMs()), q(r.error()),
                     q(p(r, ProposedDecision::decision)), q(p(r, ProposedDecision::drivers)),
                     q(p(r, ProposedDecision::reason)),
@@ -731,9 +753,9 @@ public class BatchEvaluationService {
 
     private static SampleResult errorResult(String sampleId, String message) {
         return new SampleResult(sampleId, null, null, null, null, null, null, null,
-                null, null, null, null, null, null,
+                null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null,
                 null, null,
-                false, false, false, null, null, false, null, null, 0, 0, message, null);
+                false, false, false, null, null, false, null, null, null, null, 0, 0, message, null);
     }
 }

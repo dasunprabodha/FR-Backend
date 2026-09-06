@@ -1,5 +1,6 @@
 package lk.cf.fr.monolith.decision;
 
+import lk.cf.fr.monolith.analysis.RegistrationAnalysisService.CrossChannelConsistency;
 import lk.cf.fr.monolith.analysis.RegistrationAnalysisService.FaceAnalysis;
 import lk.cf.fr.monolith.identity.IdentityBindingResult;
 import lk.cf.fr.monolith.verification.model.ComparisonResult;
@@ -79,6 +80,67 @@ public class DependencyAwareDecisionService {
     private double livenessMargin;
 
     /**
+     * Whether the binding group reads {@link IdentityBindingResult#outcome()} directly instead of
+     * putting {@link IdentityBindingResult#score()} through {@link #band}. Ablation rung R3.
+     *
+     * <p>The band is a defect on this input, not a tuning choice. {@code IdentityBindingService}
+     * does not produce a continuum: it produces one of six labels, three of which are documented as
+     * positive matches, and assigns each a fixed constant - 1.00, 0.85, 0.80. Two of those three
+     * constants land inside a &plusmn;0.10 band around the 0.80 cutoff, so
+     * {@code CONFUSION_CORRECTED_MATCH} and {@code FORMAT_EQUIVALENT_MATCH} can never reach
+     * SUPPORTS however the numbers are read. A successful old-format/new-format reconciliation -
+     * the whole reason {@code SriLankanNicFormat} exists - is therefore reported as too close to
+     * call. A margin band expresses "this measurement could have fallen either side"; a categorical
+     * verdict could not have.
+     *
+     * <p>Left off by default so the recorded run stays reproducible. Turning it on changes nothing
+     * about which numbers are compared, only whether a decided label is re-litigated as a score.
+     */
+    @Value("${verification.decision.binding-categorical:false}")
+    private boolean bindingCategorical;
+
+    /**
+     * Whether DOCUMENT_PORTRAIT abstains, rather than contradicting, when its two channels land on
+     * opposite sides of the similarity threshold. Ablation rung R4.
+     *
+     * <p>{@link EvidenceGroup} takes the minimum of a group's members because the minimum is the
+     * Fr&eacute;chet lower bound on their conjunction. That argument holds only while the members
+     * are measurements <em>of the same quantity</em>. When the presented card and the uploaded scan
+     * disagree about whether the portrait matches the live face, the premise has failed: one of the
+     * two images is misleading and the minimum silently assumes it is the honest one. That is not a
+     * conservative reading of the evidence, it is a confident reading of the worse half of it.
+     *
+     * <p>So when {@link CrossChannelConsistency#isDivergent()} fires and the better channel clears
+     * the threshold outright, the group reports MARGINAL: a question for a human, not a
+     * contradiction. Note this consumes the divergence signal the pipeline already computes and
+     * then discards - no new threshold is introduced, and nothing here is fitted to a corpus.
+     */
+    @Value("${verification.decision.divergence-inconclusive:false}")
+    private boolean divergenceInconclusive;
+
+    /**
+     * Whether CHANNEL_AGREEMENT reports NOT_APPLICABLE, rather than ABSENT, when no scan was
+     * uploaded at all. Ablation rung R5.
+     *
+     * <p>ABSENT and NOT_APPLICABLE both mean "no value", but they mean opposite things about the
+     * pipeline. ABSENT is a measurement that should have been possible and was not - a face the
+     * detector could not find - and routing it to a human is right, because something went wrong.
+     * NOT_APPLICABLE is a comparison that does not exist in this configuration, which is how the
+     * liveness group already treats an offline replay.
+     *
+     * <p>Comparison 5 compares the uploaded scan against the presented card. With no upload there
+     * is no second channel, so there is nothing that could have been measured and nothing went
+     * wrong. Treating that as ABSENT sends every scan-less enrolment to a reviewer on the strength
+     * of a comparison that was never applicable - which, with the OCR fallback supplying binding
+     * evidence from the capture itself, is the single largest source of unnecessary review load.
+     *
+     * <p>This does not weaken the rule against the withheld-scan attack. That attack is caught by
+     * identity binding, which the fallback makes available precisely when the scan is missing.
+     */
+    @Value("${verification.decision.channel-na-without-scan:false}")
+    private boolean channelNaWithoutScan;
+
+    /**
      * @param liveness null in offline corpus replay, where no device liveness session exists. The
      *                 group is then {@link EvidenceState#NOT_APPLICABLE} and excluded, which is the
      *                 same treatment the baseline gate gives it when it reports
@@ -92,9 +154,7 @@ public class DependencyAwareDecisionService {
         // Both comparisons measure a document portrait against the live face. When a scan was
         // supplied they are two photographs of the same card, so they are one source observed
         // twice, not two corroborating sources.
-        groups.add(similarityGroup("DOCUMENT_PORTRAIT",
-                "the card portrait matches the live face",
-                List.of(named("cmp1", faces.cmp1()), named("cmp4", faces.cmp4()))));
+        groups.add(documentPortraitGroup(faces));
 
         // The card was physically with the person at capture time: the presented card matches the
         // card visible in the self-with-document photo, and that photo's face matches the live one.
@@ -105,9 +165,7 @@ public class DependencyAwareDecisionService {
         // Are the two document channels even showing the same document? Excluded from the baseline
         // rule entirely, and the only signal that dissents when a substituted physical card is
         // paired with a genuine scan.
-        groups.add(similarityGroup("CHANNEL_AGREEMENT",
-                "the uploaded scan and the presented card are the same document",
-                List.of(named("cmp5", faces.cmp5()))));
+        groups.add(channelAgreementGroup(faces));
 
         groups.add(bindingGroup(binding));
         groups.add(livenessGroup(liveness));
@@ -164,6 +222,65 @@ public class DependencyAwareDecisionService {
                 describe(state, detail, sources, score));
     }
 
+    /**
+     * The two document channels against the live face, with the divergence escape hatch applied.
+     *
+     * <p>Split out from {@link #similarityGroup} because the escape hatch needs something the
+     * group itself cannot see: whether the members <em>disagreed</em>. A group reduced to
+     * {@code min} has already thrown that away.
+     */
+    private EvidenceGroup documentPortraitGroup(FaceAnalysis faces) {
+        EvidenceGroup group = similarityGroup("DOCUMENT_PORTRAIT",
+                "the card portrait matches the live face",
+                List.of(named("cmp1", faces.cmp1()), named("cmp4", faces.cmp4())));
+
+        if (!divergenceInconclusive || !group.contradicts() || group.sources().size() < 2) {
+            return group;
+        }
+
+        CrossChannelConsistency consistency = faces.consistency();
+        if (consistency == null || !consistency.isDivergent()) {
+            return group;
+        }
+
+        // Both members are measured - sources.size() == 2 established that - so the better of the
+        // two is safe to read. It has to clear the threshold outright, not merely sit nearer it:
+        // two poor channels that happen to differ are not an open question, they are agreement
+        // that the portrait does not match.
+        double better = Math.max(faces.cmp1().similarity(), faces.cmp4().similarity());
+        if (better < similarityThreshold + similarityMargin) {
+            return group;
+        }
+
+        return new EvidenceGroup(group.name(), group.sources(), group.score(), group.threshold(),
+                EvidenceState.MARGINAL,
+                String.format("channels disagree (%s), so the group abstains rather than adopting the "
+                                + "lower reading: one of the two document images is misleading and this "
+                                + "evidence cannot say which. Worse channel %.2f, better channel %.2f.",
+                        consistency.status(), group.score(), better));
+    }
+
+    /**
+     * The two document channels against each other, with the not-applicable distinction applied.
+     *
+     * <p>{@code cmp5} is null exactly when no scan was supplied - {@code analyseFaces} only builds
+     * it when {@code scannedNicBytes != null} - so a null here is a configuration fact, not a
+     * failed measurement. A non-null comparison that carries no measurement is a different thing
+     * and stays ABSENT.
+     */
+    private EvidenceGroup channelAgreementGroup(FaceAnalysis faces) {
+        String detail = "the uploaded scan and the presented card are the same document";
+
+        if (channelNaWithoutScan && faces.cmp5() == null) {
+            return new EvidenceGroup("CHANNEL_AGREEMENT", List.of(), null, similarityThreshold,
+                    EvidenceState.NOT_APPLICABLE,
+                    "no scan was uploaded, so there is no second document channel to agree with - "
+                            + "excluded from the decision rather than referred to a human");
+        }
+
+        return similarityGroup("CHANNEL_AGREEMENT", detail, List.of(named("cmp5", faces.cmp5())));
+    }
+
     private EvidenceGroup bindingGroup(IdentityBindingResult binding) {
         String detail = "the document number matches the claimed NIC";
         if (binding == null || !binding.hasEvidence()) {
@@ -173,10 +290,30 @@ public class DependencyAwareDecisionService {
         }
 
         double score = binding.score() == null ? 0.0 : binding.score();
-        EvidenceState state = band(score, bindingThreshold, bindingMargin);
+        EvidenceState state = bindingCategorical
+                ? bindingState(binding)
+                : band(score, bindingThreshold, bindingMargin);
 
         return new EvidenceGroup("IDENTITY_BINDING", List.of("binding"), round(score), bindingThreshold,
                 state, describe(state, detail, List.of(binding.outcome().name()), score));
+    }
+
+    /**
+     * Map a binding outcome straight to a state, bypassing the margin band.
+     *
+     * <p>PARTIAL is the one outcome that genuinely cannot carry a decision: the documented cause is
+     * OCR damage on an otherwise honest document, which is precisely the "measured, but I cannot
+     * tell" case REVIEW exists for. Under the band it scores at most 0.60 and so contradicts
+     * outright - a rejection on the strength of a bad photograph of the right number.
+     */
+    private static EvidenceState bindingState(IdentityBindingResult binding) {
+        return switch (binding.outcome()) {
+            case EXACT_MATCH, CONFUSION_CORRECTED_MATCH, FORMAT_EQUIVALENT_MATCH -> EvidenceState.SUPPORTS;
+            case PARTIAL -> EvidenceState.MARGINAL;
+            case MISMATCH -> EvidenceState.CONTRADICTS;
+            // Unreachable: hasEvidence() already returned for UNAVAILABLE above.
+            case UNAVAILABLE -> EvidenceState.ABSENT;
+        };
     }
 
     private EvidenceGroup livenessGroup(LivenessOutcome liveness) {

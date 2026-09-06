@@ -4,6 +4,7 @@ import lk.cf.fr.monolith.evaluation.dto.EvaluationDtos.ProgressSnapshot;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -15,13 +16,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * sample lands. There was no way to tell a run that is working from one that has wedged, and no
  * way to decide whether to wait or cancel. This makes the run observable while it is still going.
  *
- * <p>Two consumers, one source of truth:
- * <ul>
- *   <li>{@code BatchEvaluationService} logs a rendered bar after every sample, so the IntelliJ
- *       console the run was started from shows progress with no extra tooling at all;</li>
- *   <li>{@code GET /api/v2/evaluate/progress} returns the same numbers as JSON, which is what
- *       {@code tools/watch_eval.py} polls to draw a live terminal bar.</li>
- * </ul>
+ * <p>{@code GET /api/v2/evaluate/progress} publishes these counters as JSON. The Angular
+ * Evaluation page polls it once a second for as long as its batch request is open and draws the
+ * bar, the sample counts and the time remaining from what comes back.
  *
  * <p><b>ETA is a projection, not a promise.</b> It is the mean duration of the samples completed so
  * far multiplied by the number remaining. The mean (rather than the last sample's time) is used
@@ -51,9 +48,21 @@ public class EvaluationProgressTracker {
      */
     private final AtomicReference<RunProgress> latest = new AtomicReference<>();
 
+    /**
+     * Stamps each run with a number that only ever goes up, so a client can tell "the run I just
+     * launched" from "the finished run still sitting in the tracker" without comparing names.
+     *
+     * <p>Names are not usable for that. A run is normally re-run under the same name after a fix
+     * - {@code test} gets used a dozen times in an afternoon - and a watcher that identified runs
+     * by {@code runId} would discard every poll of the new run as a stale reading of the old one,
+     * leaving its progress bar stuck at "starting" for the entire run.
+     */
+    private final AtomicLong runSequence = new AtomicLong();
+
     /** Opens a new run and makes it the one {@link #snapshot()} reports on. */
     public RunProgress begin(String runId, String corpusDir, int total, boolean dryRun) {
-        RunProgress progress = new RunProgress(runId, corpusDir, total, dryRun);
+        RunProgress progress =
+                new RunProgress(runId, runSequence.incrementAndGet(), corpusDir, total, dryRun);
         latest.set(progress);
         return progress;
     }
@@ -73,6 +82,7 @@ public class EvaluationProgressTracker {
     public static final class RunProgress {
 
         private final String runId;
+        private final long runSeq;
         private final String corpusDir;
         private final int total;
         private final boolean dryRun;
@@ -96,8 +106,9 @@ public class EvaluationProgressTracker {
         private String abortedReason;
         private long finishedAtMs;
 
-        private RunProgress(String runId, String corpusDir, int total, boolean dryRun) {
+        private RunProgress(String runId, long runSeq, String corpusDir, int total, boolean dryRun) {
             this.runId = runId;
+            this.runSeq = runSeq;
             this.corpusDir = corpusDir;
             this.total = total;
             this.dryRun = dryRun;
@@ -150,6 +161,7 @@ public class EvaluationProgressTracker {
 
             return new ProgressSnapshot(
                     runId,
+                    runSeq,
                     corpusDir,
                     dryRun,
                     state,

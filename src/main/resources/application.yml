@@ -85,7 +85,7 @@ verification:
   #
   # Set to true for ablation rung B3, or once the baseline is frozen and you want the deployed
   # system to actually catch the mismatched-document attack.
-  binding-gated: false
+  binding-gated: true
 
   # When binding IS gated, does missing evidence (no scan uploaded, or OCR read no NIC-shaped
   # number) count as a failure?
@@ -101,6 +101,7 @@ verification:
   # Bottom of the positive match band in IdentityBindingService (EXACT 1.00 / CONFUSION 0.85 /
   # FORMAT 0.80), so "bound" means "bound by one of the three positive outcomes".
   binding-threshold: 0.80
+
 
   # --- Proposed rule: margin bands for the three-way decision ----------------------------------
   #
@@ -118,6 +119,60 @@ verification:
     binding-margin: 0.10
     liveness-margin: 10.0
 
+    # --- Two defect repairs, each runnable as its own labelled ablation rung -------------------
+    #
+    # These are NOT margin tuning, and the "fixed before any corpus was analysed" rule above does
+    # not cover them: neither one moves a threshold, and neither was chosen by looking at where
+    # the samples fell. Both default to false so pilot-52-ocrfix stays reproducible byte-for-byte;
+    # record each rung separately rather than folding them into one new headline figure.
+    #
+    # R3. binding-categorical - read the binding OUTCOME instead of banding its score.
+    #     IdentityBindingService emits one of six labels with a fixed constant attached
+    #     (1.00 / 0.85 / 0.80 for the three documented positive matches). A +/-0.10 band around
+    #     the 0.80 cutoff swallows two of those three, so CONFUSION_CORRECTED_MATCH and
+    #     FORMAT_EQUIVALENT_MATCH cannot reach SUPPORTS at any threshold - a successful
+    #     old-format/new-format reconciliation is reported as "too close to call". A band asks
+    #     whether a measurement could have fallen the other way; a categorical verdict could not.
+    #     Measured effect on pilot-52-ocrfix: 2 genuine attempts move REVIEW -> APPROVE
+    #     (kavinda-G01, kavinda-G02, both FORMAT_EQUIVALENT_MATCH). No attack moves.
+    #
+    # R4. divergence-inconclusive - DOCUMENT_PORTRAIT abstains instead of contradicting when its
+    #     two channels land on opposite sides of the threshold and the better one clears it.
+    #     EvidenceGroup takes the minimum as the Frechet lower bound on the conjunction, which
+    #     holds only while both members measure the same quantity. Once the presented card and the
+    #     uploaded scan disagree, one image is misleading and the minimum assumes it is the honest
+    #     one. Consumes the DIVERGENT signal assessCrossChannel already computes and discards; adds
+    #     no new threshold and nothing fitted to the data.
+    #     Measured effect on pilot-52-ocrfix: 4 genuine attempts move REJECT -> REVIEW
+    #     (milan-G01/G02, nipuna-G01/G02). The only 2 DIVERGENT attacks are CLAIM_MISMATCH and stay
+    #     REJECT on binding alone. No attack moves.
+    #
+    # R5. channel-na-without-scan - CHANNEL_AGREEMENT reports NOT_APPLICABLE, not ABSENT, when no
+    #     scan was uploaded at all. ABSENT means a measurement that should have been possible was
+    #     not; NOT_APPLICABLE means the comparison does not exist in this configuration, which is
+    #     already how the liveness group treats an offline replay. cmp5 is null exactly when no
+    #     scan was supplied, so a null there is a configuration fact, not a failed measurement.
+    #     Without this, every scan-less enrolment is referred to a human on the strength of a
+    #     comparison that was never applicable. It does not weaken the withheld-scan defence:
+    #     that attack is caught by identity binding, which the OCR fallback supplies precisely
+    #     when the scan is missing.
+    #     Measured effect on pilot-52-fallback: 6 genuine attempts move REVIEW -> APPROVE.
+    #     No attack moves.
+    #
+    # ENABLED after the pilot-52-fallback run. Recorded ablation, 22 genuine / 30 attack, with the
+    # OCR fallback on throughout:
+    #     shipped defaults   APCER 0.000  BPCER 0.273  auto-approve 31.8%  review 17.3%
+    #     R3                 APCER 0.000  BPCER 0.273  auto-approve 40.9%  review 13.5%
+    #     R4                 APCER 0.000  BPCER 0.091  auto-approve 31.8%  review 25.0%
+    #     R5                 APCER 0.000  BPCER 0.273  auto-approve 59.1%  review  5.8%
+    #     R3+R4+R5           APCER 0.000  BPCER 0.091  auto-approve 68.2%  review  9.6%
+    # No rung admits a single attack. The two remaining refusals under R3+R4+R5 are
+    # madhuka-G02/G03-UNIID, where the subject presented a university ID instead of a NIC -
+    # refusing those is correct, so BPCER against genuine NIC-bearing attempts is 0/20.
+    binding-categorical: true
+    divergence-inconclusive: true
+    channel-na-without-scan: true
+
   device-image-timeout-seconds: 120
   liveness-wait-timeout-seconds: 60
 
@@ -128,6 +183,31 @@ verification:
     similarity: 92
     liveness-passed: true
     liveness-score: 90
+
+# ---------------------------------------------------------------------------
+# Document OCR source
+# ---------------------------------------------------------------------------
+document:
+  # ocr-fallback-to-capture=false is the frozen baseline: OCR runs only on the officer-uploaded
+  # scannedNIC. With no upload there is no number, so identity binding reports UNAVAILABLE and the
+  # claimed NIC is never checked against any document - an applicant who simply declines to upload
+  # defeats the strongest signal in the system by omission.
+  #
+  # Set true to read the number off the device-captured nicImage instead when no scan was supplied.
+  # The card is cropped first (the same detector the face comparisons use) because OCR on the raw
+  # frame reads the room as well as the card.
+  #
+  # Two things this deliberately does NOT do:
+  #   1. It never rejects. A phone photo of a card at arm's length is a harder read than a flatbed
+  #      scan, so a fallback UNKNOWN must not end an attempt that would otherwise have passed as
+  #      NOT_PROVIDED. The fallback contributes binding evidence only.
+  #   2. It does not restore cross-channel independence. With one image the number and the card
+  #      come from the same source, so comparison 5 still has nothing to compare against.
+  #
+  # Every result records which image it came from (NicOcrResult.OcrSource), and results.csv carries
+  # it as ocrSource, so scan-derived and capture-derived readings can be reported separately rather
+  # than pooled - the fallback's own reliability is a measurement, not an assumption.
+  ocr-fallback-to-capture: true
 
 # ---------------------------------------------------------------------------
 # Registration MVP configuration - see REGISTRATION_IMPLEMENTATION_PROGRESS.md
@@ -218,9 +298,9 @@ aws:
   # and that commit reached the remote. Those credentials must be treated as disclosed and
   # rotated regardless of them having since expired.
   # ---------------------------------------------------------------------------
-  access-key: "ASIARQTU3F4GHUD625NB"
-  secret-key: "zXl7vYFFUQ+3XOx9eZHJZ0L+xE6TN1OqUdIFacuA"
-  session-token: "IQoJb3JpZ2luX2VjEEoaCXVzLWVhc3QtMSJIMEYCIQDl9hpqW7VoHE4UF3izCaBaXpxlATP8dP0oiNMTYRFs4QIhALynDsqAQOQq5Bz+ibq7D6mGsPpeQcPOh9oZ7ZHrKDllKsgDCBIQABoMMTA0Mzk4MDA4MDc2IgxmQXFu0BCs4TjhBtYqpQOpzqnaS9vZkvuIwhktdDRJyvR/O6OnQbzzrqYWmEt0lwAZ+8mAtjeRePUqgQ++Dchw0NqF6l4cvogLdKgbAgZnTIgwQ/fptpXVXD1Bf6wGbvvJ+OVTHtJqoTJkoiuITiACiMfyJcy/z27jrXw7hYKKbQp/d5+gNtLey1uj5OfteEvbnhx9k1SgpODi99bSo0JfGdrH/UAxqCAxj5DGVoGvR0I3Qw5Q6TsGngQs2Qla0VBDVyQVI8cmibeqg9R94CTRvw67QAk8cdnNvzAxpuc/18ROEMv6zAqyXmB/6EE72XREyYVETF5+H4fNBpebYChowIvULe+R+Qtmfb14okyY0UTX+5YlZDqA74lztSSukB1VUV9kjA1aUaIreWN3jQ2+2f4KfndMscd0aBQ4huNOME71kjw56jDumBfPQBnmPKHNIRlzK0KruOuTYJPAAUf/55UZphoVLojsIB4cmhVjKkT1bk1qrIYjPO4wexTpO/uuNGFF1jeLPWTChFyW8Ky1zHy87wUzMSRQcrXHOuaPBzWJPV4JWPfzROgfXm9HlEoui7mQMM+Z8dQGOqcB8q69+iWknOGjM2bpz47GomfwIKdsuolh5fmpe6xkKIiXJ5x4JSBogn0BNwI/CBaTklsARZMAxnfXLhveYjYZzH/n5impWYGFdEdup+yfEvpWjxqKc2aGyc8sjTYjeq5klWynjjMNtAicXAtKN9rKvQG4eNFtVXJrNJi2SaEFj9bHTE7vH5X5GNG+PGRQqfamlq9VEMJDkjw36yobDTO40bba5ueSLCM="
+  access-key: "ASIARQTU3F4GKBHOFKBB"
+  secret-key: "W5I6pjbKMUgudfEhHTwDxgr30QNiWZXRniVf/O0Y"
+  session-token: "IQoJb3JpZ2luX2VjEFQaCXVzLWVhc3QtMSJHMEUCIQCnP7RD7S36yFqqxBl2CTD/DuZOvInrAvVphDUGzanwmwIgTqUspKkRfC3NvE+qM3WXW7n9cFQDOSFS5bDFcO1bDcAqyAMIHBAAGgwxMDQzOTgwMDgwNzYiDHI0uD2y2L00HGi0qCqlA8MNdCtvsPwjasRjHw5s4IZrd6hWRdK3wz+VINwGAJD4y9VL08F07RmdgRlOmqo8WFzPtRe0X/LVWDIo2NNloO2iYPQ1nz3TDDpPwQuNTu1a/kBAevFumLlw0uhFKqpohdhbuYHonAUb9G2t6/bANzXU/JIVQD0TrIUokZ8eRFUTgeDhEv4epajOdLkDw9ctdiWGYowU8E5W77wcwwn9LE7IUx6RdhNhq5jGoEdE5ULV7WzEqBm6vDu0OyI6L5irdjUNPqPwIlVKNGaHUMp1DwgeDt4UoHQdsS3qlw7HzhpXzJVrrDiD5PopKEOGEWlAi0PwvtkJo0T44X5qr1JesN4VnkHQ0fF6cm33OPJPFZgnwpYE8S1WFiLorWm4fpHNvMX67ihTT3lnLZv1UiKuGZvp2ZIhM199U1X47+h2569qDGU8UvvAq/Lar8kx5iOIAKnBWx1VkLlg6x/VipyjmgJflelSwfi6u32SJMs1/CUWktstPgqXY1W8PIjYcpQq2Fpf8c5+cbRFTV1K2VK44/Kqai0j1z1JzJgO0uTy7qtp/0v+esAw1bfz1AY6qAEz0URtAadE1uh4hv3BUfNNJVjg03Zi7IpGTjrllcOioRdXd8s9zHVnseDhW+7MUu6tanEFH3TVInVLg731aG/RQ+ulU+AKPf8oBjeCGLpm5hFxw9vgpGiuGf9myIj82tTjh6wpTyAVvmxBfjc7BwCvdQj+d6tftz4ywr/rJkeeetSL9xLrbk7+IwjoTAbQ/UqC7jiPetuN2YNPY+1+UAACi1Gj18ma5FY="
 
   s3:
     # Bucket containing enrolled reference faces at FaceOnly/<nic>.jpg (see

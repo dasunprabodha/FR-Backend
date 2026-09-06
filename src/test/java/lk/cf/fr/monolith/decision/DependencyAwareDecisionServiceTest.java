@@ -1,5 +1,6 @@
 package lk.cf.fr.monolith.decision;
 
+import lk.cf.fr.monolith.analysis.RegistrationAnalysisService.CrossChannelConsistency;
 import lk.cf.fr.monolith.analysis.RegistrationAnalysisService.FaceAnalysis;
 import lk.cf.fr.monolith.identity.IdentityBindingResult;
 import lk.cf.fr.monolith.identity.IdentityBindingResult.BindingOutcome;
@@ -39,6 +40,14 @@ class DependencyAwareDecisionServiceTest {
         ReflectionTestUtils.setField(service, "similarityMargin", 5.0);
         ReflectionTestUtils.setField(service, "bindingMargin", 0.10);
         ReflectionTestUtils.setField(service, "livenessMargin", 10.0);
+        // Both repairs default off, so every expectation below still pins the recorded rule.
+        ReflectionTestUtils.setField(service, "bindingCategorical", false);
+        ReflectionTestUtils.setField(service, "divergenceInconclusive", false);
+        ReflectionTestUtils.setField(service, "channelNaWithoutScan", false);
+    }
+
+    private void enable(String flag) {
+        ReflectionTestUtils.setField(service, flag, true);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -58,6 +67,26 @@ class DependencyAwareDecisionServiceTest {
     private static FaceAnalysis faces(Double c1, Double c2, Double c3, Double c4, Double c5) {
         return new FaceAnalysis(cmp(c1), cmp(c2), cmp(c3), cmp(c4), cmp(c5),
                 null, true, true, c5 != null, 0L);
+    }
+
+    /** As {@link #faces}, but with the cross-channel assessment the pipeline derives from cmp1/cmp4. */
+    private static FaceAnalysis facesWithConsistency(Double c1, Double c2, Double c3, Double c4, Double c5) {
+        boolean divergent = c1 != null && c4 != null && (c1 >= 80.0) != (c4 >= 80.0);
+        Double delta = c1 == null || c4 == null ? null : Math.abs(c1 - c4);
+        CrossChannelConsistency consistency = new CrossChannelConsistency(
+                c1 == null || c4 == null ? "UNAVAILABLE" : divergent ? "DIVERGENT" : "CONSISTENT",
+                delta, c1, c4, "test");
+        return new FaceAnalysis(cmp(c1), cmp(c2), cmp(c3), cmp(c4), cmp(c5),
+                consistency, true, true, c5 != null, 0L);
+    }
+
+    private static IdentityBindingResult formatEquivalent() {
+        return new IdentityBindingResult(BindingOutcome.FORMAT_EQUIVALENT_MATCH, 0.80,
+                "199934510785", "993451078V", 4, "old/new format equivalent");
+    }
+
+    private static IdentityBindingResult partial() {
+        return new IdentityBindingResult(BindingOutcome.PARTIAL, 0.54, "1", "1", 1, "OCR damage");
     }
 
     private static IdentityBindingResult bound() {
@@ -212,5 +241,217 @@ class DependencyAwareDecisionServiceTest {
 
         assertEquals(Decision.APPROVE, outcome.decision());
         assertGroup(outcome, "LIVENESS", EvidenceState.NOT_APPLICABLE);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Ablation rung R3: verification.decision.binding-categorical
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("R3 off: a FORMAT_EQUIVALENT match scores exactly on the cutoff, so the band calls it marginal")
+    void formatEquivalentMatchIsMarginalUnderTheBand() {
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, 98.9, 100.0), null, formatEquivalent());
+
+        // This is the defect, pinned: a documented positive match cannot support the decision,
+        // because 0.80 sits inside a +/-0.10 band centred on 0.80. No threshold value fixes it.
+        assertGroup(outcome, "IDENTITY_BINDING", EvidenceState.MARGINAL);
+        assertEquals(Decision.REVIEW, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R3 on: the outcome is read directly, so a format-equivalent match supports and approves")
+    void formatEquivalentMatchSupportsWhenReadCategorically() {
+        enable("bindingCategorical");
+
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, 98.9, 100.0), null, formatEquivalent());
+
+        assertGroup(outcome, "IDENTITY_BINDING", EvidenceState.SUPPORTS);
+        assertEquals(Decision.APPROVE, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R3 on: a mismatched number still contradicts - the repair loosens nothing that matters")
+    void mismatchStillContradictsWhenReadCategorically() {
+        enable("bindingCategorical");
+
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, 98.9, 100.0), null, mismatched());
+
+        assertGroup(outcome, "IDENTITY_BINDING", EvidenceState.CONTRADICTS);
+        assertEquals(Decision.REJECT, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R3 on: PARTIAL abstains rather than rejecting on OCR damage to the right number")
+    void partialBindingAbstainsWhenReadCategorically() {
+        enable("bindingCategorical");
+
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, 98.9, 100.0), null, partial());
+
+        assertGroup(outcome, "IDENTITY_BINDING", EvidenceState.MARGINAL);
+        assertEquals(Decision.REVIEW, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R3 on: an absent number is still absent, so the withheld-scan hole stays shut")
+    void absentBindingStillBlocksWhenReadCategorically() {
+        enable("bindingCategorical");
+
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, null, null), null, unavailable());
+
+        assertGroup(outcome, "IDENTITY_BINDING", EvidenceState.ABSENT);
+        assertEquals(Decision.REVIEW, outcome.decision());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Ablation rung R4: verification.decision.divergence-inconclusive
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("R4 off: one poor document channel drags the group down and refuses an honest applicant")
+    void divergentChannelsContradictByDefault() {
+        // nipuna-G01: the presented card reads 93.83 against the live face, the uploaded scan 63.91.
+        DecisionOutcome outcome = service.decide(
+                facesWithConsistency(93.83, 99.9, 99.9, 63.91, 99.9), null, bound());
+
+        assertGroup(outcome, "DOCUMENT_PORTRAIT", EvidenceState.CONTRADICTS);
+        assertEquals(Decision.REJECT, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R4 on: channels on opposite sides of the cutoff abstain, so it reviews instead of refusing")
+    void divergentChannelsAbstainWhenEnabled() {
+        enable("divergenceInconclusive");
+
+        DecisionOutcome outcome = service.decide(
+                facesWithConsistency(93.83, 99.9, 99.9, 63.91, 99.9), null, bound());
+
+        assertGroup(outcome, "DOCUMENT_PORTRAIT", EvidenceState.MARGINAL);
+        assertEquals(Decision.REVIEW, outcome.decision());
+        // Abstaining is not approving: nothing here says the portrait matched.
+        assertEquals("DOCUMENT_PORTRAIT", outcome.driverNames());
+    }
+
+    @Test
+    @DisplayName("R4 on: two poor channels are agreement, not divergence, so a card swap still rejects")
+    void bothChannelsPoorStillContradictsWhenEnabled() {
+        enable("divergenceInconclusive");
+
+        // A genuine card belonging to someone else, uploaded and presented: both channels fail.
+        DecisionOutcome outcome = service.decide(
+                facesWithConsistency(12.4, 99.9, 99.9, 8.7, 99.9), null, bound());
+
+        assertGroup(outcome, "DOCUMENT_PORTRAIT", EvidenceState.CONTRADICTS);
+        assertEquals(Decision.REJECT, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R4 on: a divergent CLAIM_MISMATCH is still rejected, by the number check alone")
+    void divergentClaimMismatchStillRejectsOnBinding() {
+        enable("divergenceInconclusive");
+        enable("bindingCategorical");
+
+        // milan-A01-CLAIM and nipuna-A01-CLAIM are both divergent AND number-mismatched. The
+        // portrait group steps back; binding carries the rejection on its own.
+        DecisionOutcome outcome = service.decide(
+                facesWithConsistency(97.37, 99.9, 99.9, 63.91, 99.9), null, mismatched());
+
+        assertGroup(outcome, "DOCUMENT_PORTRAIT", EvidenceState.MARGINAL);
+        assertEquals(Decision.REJECT, outcome.decision());
+        assertEquals("IDENTITY_BINDING", outcome.driverNames());
+    }
+
+    @Test
+    @DisplayName("R4 on: with no scan there is only one channel, so there is nothing to diverge")
+    void singleChannelIsUnaffectedByTheDivergenceRepair() {
+        enable("divergenceInconclusive");
+
+        DecisionOutcome outcome = service.decide(
+                facesWithConsistency(42.0, 99.9, 99.9, null, null), null, unavailable());
+
+        assertGroup(outcome, "DOCUMENT_PORTRAIT", EvidenceState.CONTRADICTS);
+        assertEquals(Decision.REJECT, outcome.decision());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Ablation rung R5: verification.decision.channel-na-without-scan
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("R5 off: no scan makes the channel group absent, which refers the sample to a human")
+    void noScanLeavesChannelAgreementAbsentByDefault() {
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, null, null), null, bound());
+
+        assertGroup(outcome, "CHANNEL_AGREEMENT", EvidenceState.ABSENT);
+        assertEquals(Decision.REVIEW, outcome.decision());
+        assertEquals("CHANNEL_AGREEMENT", outcome.driverNames());
+    }
+
+    @Test
+    @DisplayName("R5 on: with no scan there is no second channel, so the group is excluded and it approves")
+    void noScanMakesChannelAgreementNotApplicable() {
+        enable("channelNaWithoutScan");
+
+        // The case the OCR fallback creates: no upload, but the number was read off the capture,
+        // so binding carries real evidence and cmp5 is the only thing left with nothing to say.
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, null, null), null, bound());
+
+        assertGroup(outcome, "CHANNEL_AGREEMENT", EvidenceState.NOT_APPLICABLE);
+        assertEquals(Decision.APPROVE, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R5 on: a scan that was uploaded but unreadable is still ABSENT, not excluded")
+    void unmeasurableChannelWithAScanIsStillAbsentUnderR5() {
+        enable("channelNaWithoutScan");
+
+        // The distinction R5 turns on: NOT_APPLICABLE means "this comparison does not exist here",
+        // while ABSENT means "it should have been measurable and was not". A scan was supplied, so
+        // cmp5 existed and failed - something went wrong, and a human should see it.
+        FaceAnalysis analysis = new FaceAnalysis(cmp(98.9), cmp(99.9), cmp(99.9), cmp(98.9),
+                unmeasured(), null, true, true, true, 0L);
+
+        DecisionOutcome outcome = service.decide(analysis, null, bound());
+
+        assertGroup(outcome, "CHANNEL_AGREEMENT", EvidenceState.ABSENT);
+        assertEquals(Decision.REVIEW, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R5 on: a scan-less card swap is still caught, because binding is what catches it")
+    void noScanCardSwapStillRejectsUnderR5() {
+        enable("channelNaWithoutScan");
+        enable("bindingCategorical");
+
+        // Someone else's card, no scan uploaded, but the OCR fallback read the card's own number:
+        // it is not the number claimed, so binding contradicts and R5 has loosened nothing.
+        DecisionOutcome outcome = service.decide(
+                faces(12.4, 99.9, 99.9, null, null), null, mismatched());
+
+        assertGroup(outcome, "CHANNEL_AGREEMENT", EvidenceState.NOT_APPLICABLE);
+        assertEquals(Decision.REJECT, outcome.decision());
+    }
+
+    @Test
+    @DisplayName("R5 on: no scan and no number read at all still goes to a human, not to approval")
+    void noScanAndNoBindingStillReviewsUnderR5() {
+        enable("channelNaWithoutScan");
+        enable("bindingCategorical");
+
+        // The withheld-evidence case with the fallback unavailable or unsuccessful. R5 removes the
+        // channel group's objection, but binding is still absent, and that alone holds the sample.
+        DecisionOutcome outcome = service.decide(
+                faces(98.9, 99.9, 99.9, null, null), null, unavailable());
+
+        assertGroup(outcome, "CHANNEL_AGREEMENT", EvidenceState.NOT_APPLICABLE);
+        assertGroup(outcome, "IDENTITY_BINDING", EvidenceState.ABSENT);
+        assertEquals(Decision.REVIEW, outcome.decision());
+        assertEquals("IDENTITY_BINDING", outcome.driverNames());
     }
 }
