@@ -113,6 +113,22 @@ public class RegistrationAnalysisService {
     private boolean ocrFallbackToCapture;
 
     /**
+     * Whether the scan-versus-presented-card comparison participates in the gate.
+     *
+     * <p>False is the frozen baseline. Comparison 5 asks whether the uploaded scan and the card
+     * physically presented are the same document - the only signal that dissents when an applicant
+     * pairs someone else's card with a clean scan of their own. Identity binding cannot see that
+     * attack: the number on the uploaded scan is genuinely theirs, so binding reports a match and
+     * the gate approves. Measured on the derived corpus, that attack passed the gate 5 times out
+     * of 6 with binding already switched on.
+     *
+     * <p>Like comparison 4, an absent measurement is excluded rather than treated as a failure -
+     * with no upload there is no second channel, and that is a configuration fact, not a mismatch.
+     */
+    @Value("${verification.channel-gated:false}")
+    private boolean channelGated;
+
+    /**
      * OCR the supplied document and bind the number it carries to the claimed NIC.
      *
      * <p>Preference order is upload first, device capture second. The upload is preferred because
@@ -328,6 +344,13 @@ public class RegistrationAnalysisService {
                 && faces.cmp3().match()
                 && (faces.cmp4() == null || faces.cmp4().match());
 
+        // Comparison 5 is conditional in exactly the way comparison 4 is: it decides only when it
+        // was measurable. A null here means no scan was uploaded, not that the channels disagree.
+        boolean channelBlocks = channelGated
+                && faces.cmp5() != null
+                && faces.cmp5().hasMeasurement()
+                && !faces.cmp5().match();
+
         Boolean bindingPassed = evaluateBinding(binding);
 
         // Absent binding evidence is not a failure unless binding-required says so, mirroring the
@@ -335,16 +358,16 @@ public class RegistrationAnalysisService {
         boolean bindingBlocks = bindingGated && Boolean.FALSE.equals(bindingPassed);
 
         if (liveness == null) {
-            boolean passedSoFar = similarityPassed && !bindingBlocks;
+            boolean passedSoFar = similarityPassed && !bindingBlocks && !channelBlocks;
             return new GateResult(similarityPassed, null,
                     passedSoFar ? null : buildFailureReason(similarityPassed, true, bindingBlocks, binding),
-                    bindingPassed, bindingGated);
+                    bindingPassed, bindingGated, channelBlocks, channelGated);
         }
 
-        boolean allPassed = similarityPassed && liveness.passed() && !bindingBlocks;
+        boolean allPassed = similarityPassed && liveness.passed() && !bindingBlocks && !channelBlocks;
         return new GateResult(similarityPassed, allPassed,
                 buildFailureReason(similarityPassed, liveness.passed(), bindingBlocks, binding),
-                bindingPassed, bindingGated);
+                bindingPassed, bindingGated, channelBlocks, channelGated);
     }
 
     /**
@@ -440,7 +463,8 @@ public class RegistrationAnalysisService {
      *                      rule that was applied, not the one currently configured.
      */
     public record GateResult(boolean similarityPassed, Boolean allPassed, String failureReason,
-                              Boolean bindingPassed, boolean bindingGated) {
+                              Boolean bindingPassed, boolean bindingGated,
+                              boolean channelBlocked, boolean channelGated) {
 
         /** True when binding was gated and refused the claim - the conjunct that blocked it. */
         public boolean bindingBlocked() {
@@ -457,7 +481,7 @@ public class RegistrationAnalysisService {
          * everything the gate decided, minus the one input the replay cannot supply.
          */
         public boolean passedExcludingLiveness() {
-            return similarityPassed && !bindingBlocked();
+            return similarityPassed && !bindingBlocked() && !channelBlocked;
         }
     }
 }

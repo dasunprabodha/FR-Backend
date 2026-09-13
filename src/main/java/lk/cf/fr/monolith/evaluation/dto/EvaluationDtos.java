@@ -133,6 +133,18 @@ public final class EvaluationDtos {
             String subjectId,
             String groundTruth,
             String attackType,
+
+            /*
+             * True when the sample was assembled from photographs collected for other samples
+             * rather than captured as its own session. Read from sample.json's extra.constructed.
+             *
+             * Surfaced as a first-class column because a corpus may hold both kinds at once, and a
+             * pooled accuracy figure across them would mix field measurement with mechanism check.
+             * Without this the two are distinguishable only by naming convention, which is not a
+             * guarantee.
+             */
+            Boolean constructed,
+
             String device,
             String lighting,
             String claimedNic,
@@ -171,8 +183,15 @@ public final class EvaluationDtos {
             /* Binding was gated and refused the claim. */
             Boolean bindingBlocked,
 
-            /* similarityPassed AND binding - the gate minus liveness, which a replay cannot supply. */
-            Boolean gatePassedExLiveness,
+            /* The scan-vs-presented-card comparison was gated and refused the claim. */
+            Boolean channelBlocked,
+
+            /*
+             * What the deployed rule decides, with liveness set aside. Named for what it is rather
+             * than for what it omits: a replay has no liveness channel, so allPassed is null on
+             * every row and this is the only column that states the rule's actual verdict.
+             */
+            Boolean decisionWithoutLiveness,
             String failureReason,
 
             long documentLatencyMs,

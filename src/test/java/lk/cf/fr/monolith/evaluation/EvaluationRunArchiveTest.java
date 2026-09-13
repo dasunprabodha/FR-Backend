@@ -45,14 +45,14 @@ class EvaluationRunArchiveTest {
     private SampleResult row(String id, String truth, String binding, String ocr,
                              Double cmp3, boolean passed, String proposedDecision) {
         return new SampleResult(
-                id, "eval-" + id, "subject-" + id, truth, null, "pixel", "L1", "199934510785",
+                id, "eval-" + id, "subject-" + id, truth, null, false, "pixel", "L1", "199934510785",
                 ocr, "SCANNED_UPLOAD", "199934510785", 97.5,
                 binding, 1.0, 0,
                 true, 91.25, true, 88.0, true, cmp3, null, null, null, null,
                 "CONSISTENT", 3.25,
                 true, true, false,
                 72.0, true,
-                passed, passed, false, passed, passed ? null : "similarity below threshold",
+                passed, passed, false, false, passed, passed ? null : "similarity below threshold",
                 120, 340, null,
                 proposedDecision == null ? null : new ProposedDecision(
                         proposedDecision, "coPresence", "co-presence satisfied",

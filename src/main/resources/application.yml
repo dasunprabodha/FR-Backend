@@ -102,6 +102,23 @@ verification:
   # FORMAT 0.80), so "bound" means "bound by one of the three positive outcomes".
   binding-threshold: 0.80
 
+  # channel-gated=false is the frozen baseline. Comparison 5 - the uploaded scan against the card
+  # physically presented - is the only signal that dissents when an applicant pairs someone else's
+  # card with a clean scan of their own. Identity binding cannot see that attack, because the
+  # number on the uploaded scan genuinely is theirs: binding reports EXACT_MATCH and the gate
+  # approves. Measured on data/corpus-derived (CHANNEL_MISMATCH, n=6) that attack passed the gate
+  # 5 times out of 6 with binding already on, and comparison 5 caught 6 of 6 with no false alarm
+  # on any bona-fide sample that had a scan to compare (0 of 14).
+  #
+  # Conditional in the same way comparison 4 is: an absent measurement is excluded, never treated
+  # as a failure. With no upload there is no second channel, which is a configuration fact rather
+  # than a disagreement.
+  #
+  # ENABLED after the derived-corpus run. The 14 bona-fide samples behind "no false alarms" are a
+  # thin basis - widen it before deployment, especially with poor-quality and photocopied-but-
+  # legitimate scans, which are the conditions most likely to make this fire wrongly.
+  channel-gated: true
+
 
   # --- Proposed rule: margin bands for the three-way decision ----------------------------------
   #
@@ -267,6 +284,39 @@ fr:
   carddetector:
     path: /models/card_model_2.onnx
 
+  # ---------------------------------------------------------------------------
+  # Sinhala / Tamil OCR - the two thirds of a Sri Lankan NIC that Rekognition
+  # cannot read.
+  #
+  # Every field on the card is printed three times: Sinhala, Tamil, English.
+  # Rekognition DetectText supports Latin script only, so document classification
+  # was deciding "is this a national identity card?" from the English third
+  # alone. This second pass runs Tesseract locally (already on the classpath via
+  # javacv-platform) over the same cropped card image and reads the other two.
+  #
+  # OFF BY DEFAULT, deliberately. Turning it on changes document classification,
+  # so a run with it on is not comparable to a run with it off. Switch it on for
+  # a run, record that you did, and compare the two - do not leave it on and then
+  # compare against older results.
+  #
+  # It can only ever promote a document to VALID, never demote one: it may set
+  # the national-identity flag, and is not consulted for the student-ID and
+  # driving-licence rejections. A failure, or missing language data, leaves the
+  # Rekognition result exactly as it was.
+  #
+  # Language data is NOT in version control (data/ is gitignored). Fetch it with
+  # tools/fetch-tessdata.sh before enabling, or this stays off and says so once
+  # in the log.
+  #
+  # Costs roughly 1.3 s per card on this corpus, entirely local - no AWS call, no
+  # data leaving the machine, and nothing that needs re-consenting.
+  # ---------------------------------------------------------------------------
+  ocr:
+    multilingual:
+      enabled: false
+      tessdata-path: ./data/tessdata
+      languages: sin+tam+eng
+
 # ---------------------------------------------------------------------------
 # AWS Rekognition / S3 - shared by verification (CompareFaces, Face Liveness) and registration
 # (adds DetectText for NIC/document OCR) - only read when aws.enabled=true below.
@@ -298,9 +348,9 @@ aws:
   # and that commit reached the remote. Those credentials must be treated as disclosed and
   # rotated regardless of them having since expired.
   # ---------------------------------------------------------------------------
-  access-key: "ASIARQTU3F4GKBHOFKBB"
-  secret-key: "W5I6pjbKMUgudfEhHTwDxgr30QNiWZXRniVf/O0Y"
-  session-token: "IQoJb3JpZ2luX2VjEFQaCXVzLWVhc3QtMSJHMEUCIQCnP7RD7S36yFqqxBl2CTD/DuZOvInrAvVphDUGzanwmwIgTqUspKkRfC3NvE+qM3WXW7n9cFQDOSFS5bDFcO1bDcAqyAMIHBAAGgwxMDQzOTgwMDgwNzYiDHI0uD2y2L00HGi0qCqlA8MNdCtvsPwjasRjHw5s4IZrd6hWRdK3wz+VINwGAJD4y9VL08F07RmdgRlOmqo8WFzPtRe0X/LVWDIo2NNloO2iYPQ1nz3TDDpPwQuNTu1a/kBAevFumLlw0uhFKqpohdhbuYHonAUb9G2t6/bANzXU/JIVQD0TrIUokZ8eRFUTgeDhEv4epajOdLkDw9ctdiWGYowU8E5W77wcwwn9LE7IUx6RdhNhq5jGoEdE5ULV7WzEqBm6vDu0OyI6L5irdjUNPqPwIlVKNGaHUMp1DwgeDt4UoHQdsS3qlw7HzhpXzJVrrDiD5PopKEOGEWlAi0PwvtkJo0T44X5qr1JesN4VnkHQ0fF6cm33OPJPFZgnwpYE8S1WFiLorWm4fpHNvMX67ihTT3lnLZv1UiKuGZvp2ZIhM199U1X47+h2569qDGU8UvvAq/Lar8kx5iOIAKnBWx1VkLlg6x/VipyjmgJflelSwfi6u32SJMs1/CUWktstPgqXY1W8PIjYcpQq2Fpf8c5+cbRFTV1K2VK44/Kqai0j1z1JzJgO0uTy7qtp/0v+esAw1bfz1AY6qAEz0URtAadE1uh4hv3BUfNNJVjg03Zi7IpGTjrllcOioRdXd8s9zHVnseDhW+7MUu6tanEFH3TVInVLg731aG/RQ+ulU+AKPf8oBjeCGLpm5hFxw9vgpGiuGf9myIj82tTjh6wpTyAVvmxBfjc7BwCvdQj+d6tftz4ywr/rJkeeetSL9xLrbk7+IwjoTAbQ/UqC7jiPetuN2YNPY+1+UAACi1Gj18ma5FY="
+  access-key: "ASIARQTU3F4GL7IE5SF5"
+  secret-key: "cge9Gu+kCzdOr25C42DSZ8NVB37dtqNaXwHkyAHj"
+  session-token: "IQoJb3JpZ2luX2VjEPz//////////wEaCXVzLWVhc3QtMSJGMEQCIBoEjJkObW+2+Zo4ebsfz+6wD3ZuOGCViBx8GokMmH+QAiBds9ZnGpi3koGioO8+Trs/2KhfxtAKhBQenJTBclLnsCrRAwjF//////////8BEAAaDDEwNDM5ODAwODA3NiIMqlbGiUafyirUxmN2KqUDuyoiF073EzmkzRy4f3u7JfjlOFxYswZifK/8RJsRkuMkJz3BIgvjIqzaZDrcq5DP3Huvh8THqracerWIAR4vH4Zwbg+T+RBbhtmnaWH47AxSny1a1R6SCCbhe/BMQyfZKE0I7rmx+1h/wB9c0/Qem5ffNGcTmzuXdCaCT1em8i/YggZKqJy5btAAtmJJ8UM3q6Iysd4vDVPelW60S+MLixogLEeFpHLV31IxakwkMgV718q+EYrz/vEIw3kaJhLvyYaRXYFuwyX8SRPD6EyWGWI8z7CAji6naPmdJbnHFh0NLyeP2wTAfm89/Qbc2TZyP2g3ArLYMGAw7yNc01GuCh6rvh776nX7ZeRIqMNbvZZEAv0oqe2180vBnbruYufc8Kd1OowoW4h9UvNq8lT02RE92joVh8h0QB/6nh7Z9N0+NgBXUA3Qux5Tcu7EeXPStl4sTpxSNNHov5h4yI3xyHnGDNZQ+Dv2E7rRfeXqNjwbA38KYbYaqFtWv19yK1cRHF+8lbgAmPzS2Q2jsYyr0Kd7K8XUbX8+PGWeF2xuRhLjCxCL9DDKuZjVBjqpAWll8kp5r+gLq0/3TEZqNcTC0CLqtMVjQ5aK64wa/c+M0DxrQLM5okrtkKSDhtZL28fg0jte8m6WZpy7BVuUpQ4h2+Ssh3lkIgln8mVjPvRcKMrdD8M/0teykFYVseIPPOL06ibuCEi6tpvVDUXSB6zl5JWCPqccLEvYxups5sC6FB1uxNXNcaw+j6x5oWZbMclzAceo6qRjQZXnPP/YOIzhH7X+7F6V0tc="
 
   s3:
     # Bucket containing enrolled reference faces at FaceOnly/<nic>.jpg (see

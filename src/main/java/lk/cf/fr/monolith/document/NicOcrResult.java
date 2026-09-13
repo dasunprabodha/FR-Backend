@@ -56,7 +56,17 @@ public record NicOcrResult(
         boolean drivingLicenseKeyword,
 
         /* Which image this reading came from. See {@link OcrSource}. */
-        OcrSource source
+        OcrSource source,
+
+        /*
+         * What the local Sinhala/Tamil pass read, or MultilingualNicText.unavailable().
+         *
+         * Held alongside the Rekognition reading rather than folded into it: which engine saw what
+         * is itself the measurement, and merging them would make the two impossible to separate
+         * afterwards. The only field above the multilingual pass may change is nationalIdKeyword,
+         * and only ever from false to true.
+         */
+        MultilingualNicText multilingual
 ) {
 
     /**
@@ -88,14 +98,22 @@ public record NicOcrResult(
                         boolean drivingLicenseKeyword) {
         this(outcome, extractedNicNumber, canonicalNicNumber, candidateNumbers, numberFormat,
                 digitCorrectionApplied, meanLineConfidence, minLineConfidence, lines,
-                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, OcrSource.SCANNED_UPLOAD);
+                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, OcrSource.SCANNED_UPLOAD,
+                MultilingualNicText.unavailable());
     }
 
     /** Same reading, re-tagged with the image it actually came from. */
     public NicOcrResult withSource(OcrSource newSource) {
         return new NicOcrResult(outcome, extractedNicNumber, canonicalNicNumber, candidateNumbers,
                 numberFormat, digitCorrectionApplied, meanLineConfidence, minLineConfidence, lines,
-                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, newSource);
+                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, newSource, multilingual);
+    }
+
+    /** The same Rekognition reading, with what the local multilingual pass recovered attached. */
+    public NicOcrResult withMultilingual(MultilingualNicText text) {
+        return new NicOcrResult(outcome, extractedNicNumber, canonicalNicNumber, candidateNumbers,
+                numberFormat, digitCorrectionApplied, meanLineConfidence, minLineConfidence, lines,
+                nationalIdKeyword, studentIdKeyword, drivingLicenseKeyword, source, text);
     }
 
     /** One Rekognition {@code LINE} detection: the uppercased text and its confidence (0-100). */
@@ -125,7 +143,8 @@ public record NicOcrResult(
      */
     public static NicOcrResult notProvided() {
         return new NicOcrResult(null, null, null, List.of(), NicNumberFormat.NONE, false,
-                null, null, List.of(), false, false, false, OcrSource.NONE);
+                null, null, List.of(), false, false, false, OcrSource.NONE,
+                MultilingualNicText.unavailable());
     }
 
     /** Fallback for an OCR call that threw - same shape as {@code UNKNOWN}, no evidence carried. */

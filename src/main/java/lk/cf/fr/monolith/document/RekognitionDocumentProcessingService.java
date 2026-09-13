@@ -43,8 +43,11 @@ import java.util.stream.DoubleStream;
 public class RekognitionDocumentProcessingService implements DocumentProcessingService {
 
     private final RekognitionClient rekognitionClient;
+    private final MultilingualNicTextExtractor multilingualExtractor;
 
-    public RekognitionDocumentProcessingService(RekognitionClient rekognitionClient) {
+    public RekognitionDocumentProcessingService(RekognitionClient rekognitionClient,
+                                                MultilingualNicTextExtractor multilingualExtractor) {
+        this.multilingualExtractor = multilingualExtractor;
         this.rekognitionClient = rekognitionClient;
     }
 
@@ -198,6 +201,21 @@ public class RekognitionDocumentProcessingService implements DocumentProcessingS
                 }
             }
 
+            // The Sinhala and Tamil thirds of the card, which DetectText cannot read at all.
+            //
+            // Strictly additive: it may turn newNationalId on, never off, and it is not consulted
+            // for the student-ID and driving-licence rejections below. So the worst it can do to a
+            // document the Latin ladder already classified is nothing, and what it recovers is a
+            // card that says "national identity card" twice in scripts the primary engine is blind
+            // to. Off by default - see fr.ocr.multilingual.enabled.
+            MultilingualNicText multilingual = multilingualExtractor.extract(imageBytes);
+            if (multilingual.anyNationalIdKeyword() && !newNationalId) {
+                log.info("[NIC-OCR] Latin ladder found no national-identity wording, but the local "
+                                + "pass did (sinhala={}, tamil={}) -> nationalIdKeyword promoted",
+                        multilingual.sinhalaNationalIdKeyword(), multilingual.tamilNationalIdKeyword());
+            }
+            newNationalId = newNationalId || multilingual.anyNationalIdKeyword();
+
             NicValidationOutcome outcome;
             if ((newNationalId || oldNationalId) && !(studentId || drivingLicense)) {
                 outcome = NicValidationOutcome.VALID;
@@ -227,7 +245,8 @@ public class RekognitionDocumentProcessingService implements DocumentProcessingS
 
             return new NicOcrResult(outcome, primary, canonical, List.copyOf(candidates), primaryFormat,
                     correctionApplied, meanConfidence, minConfidence, List.copyOf(lines),
-                    newNationalId, studentId, drivingLicense);
+                    newNationalId, studentId, drivingLicense, NicOcrResult.OcrSource.SCANNED_UPLOAD,
+                    multilingual);
         } catch (Exception e) {
             log.error("[NIC-OCR] DetectText failed -> UNKNOWN", e);
             return NicOcrResult.unknown();

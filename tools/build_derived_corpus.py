@@ -15,6 +15,11 @@ checks.
                 ELSE'S in the co-presence capture
                 -> cmp2 (presented card vs card in the held photo) must disagree
 
+    A-FACESWAP  the enrolment portrait is one person and the co-presence photo is a different
+                person - a coached impostor pair, one doing the face capture and the other
+                holding the card
+                -> cmp3 (live face vs face in the held photo) must disagree
+
 EVIDENTIAL STATUS - the two are not equally strong, and the thesis must say so.
 
   A-CHANNEL is a faithful reconstruction. In the deployed system the scan is a file the officer
@@ -53,6 +58,17 @@ A_CHANNEL = [
     ("A-CHANNEL-04-dilshan", "dilshan", "dilshan-A02-SWAP", "dilshan-G01"),
     ("A-CHANNEL-05-kavinda", "kavinda", "kavinda-A02-SWAP", "kavinda-G01"),
     ("A-CHANNEL-06-nuwan",   "nuwan",   "nuwan-A02-SWAP",   "nuwan-G01"),
+]
+
+# (sample id, face subject, genuine sample supplying face+card+scan, sample supplying a DIFFERENT
+#  person's co-presence photo)
+A_FACESWAP = [
+    ("A-FACESWAP-01-dasun-x-nuwan",     "dasun",   "dasun-G01",   "nuwan-G01"),
+    ("A-FACESWAP-02-nuwan-x-dasun",     "nuwan",   "nuwan-G01",   "dasun-G01"),
+    ("A-FACESWAP-03-kavinda-x-dilshan", "kavinda", "kavinda-G01", "dilshan-G01"),
+    ("A-FACESWAP-04-dilshan-x-kavinda", "dilshan", "dilshan-G01", "kavinda-G01"),
+    ("A-FACESWAP-05-sumudu-x-milan",    "sumudu",  "sumudu-G01",  "milan-G01"),
+    ("A-FACESWAP-06-milan-x-sumudu",    "milan",   "milan-G01",   "sumudu-G01"),
 ]
 
 # (sample id, presenter, genuine sample supplying own card+face+scan, swap sample supplying selfImage)
@@ -150,6 +166,41 @@ def build(src: Path, out: Path, dry: bool) -> int:
         })
         made += 1
 
+    for sample_id, subject, genuine, other in A_FACESWAP:
+        own = load(src, genuine)
+        dst = out / sample_id
+        print(f"  {sample_id:30} {genuine} face/card/scan + {other} co-presence   claim={own['claimedNic']}")
+        if dry:
+            continue
+        dst.mkdir(parents=True, exist_ok=True)
+        # Everything except the co-presence frame belongs to the enrolling subject.
+        for f in (NIC_IMAGE, FACE_IMAGE, SCANNED_NIC):
+            copy(src / genuine / f, dst, f)
+        # The co-presence frame is a different person entirely.
+        copy(src / other / SELF_IMAGE, dst, SELF_IMAGE)
+        write_labels(dst, {
+            "claimedNic": own["claimedNic"],
+            "subjectId": subject,
+            "groundTruth": "ATTACK",
+            "attackType": "FACE_SUBSTITUTION",
+            "device": "unspecified",
+            "lighting": own.get("lighting", "L1"),
+            "distance": "near",
+            "extra": {
+                "constructed": "true",
+                "derivedFrom": f"face/card/scan={genuine}; coPresence={other}",
+                "coPresenceSubject": load(src, other)["subjectId"],
+                "recipe": "one person supplies the enrolment portrait, a different person appears "
+                          "in the co-presence photo holding the card",
+                "targets": "cmp3 (live face vs face in the held photo) must disagree",
+                "evidentialStatus": "constructed composite - the portrait and the co-presence photo "
+                                    "are separate captures in the live flow, so a coached impostor "
+                                    "pair is a real branch scenario, but these two frames were not "
+                                    "recorded as one session",
+            },
+        })
+        made += 1
+
     return made
 
 
@@ -172,7 +223,7 @@ def main() -> int:
         print(f"\nmissing required image: {e}", file=sys.stderr)
         return 1
 
-    print(f"\n{'would write' if args.dry_run else 'wrote'} {made if not args.dry_run else len(A_CHANNEL) + len(A_SWAPMID)} samples")
+    print(f"\n{'would write' if args.dry_run else 'wrote'} {made if not args.dry_run else len(A_CHANNEL) + len(A_SWAPMID) + len(A_FACESWAP)} samples")
     if not args.dry_run:
         print("Every sample carries extra.constructed=true - keep them reported separately.")
     return 0

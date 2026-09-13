@@ -300,6 +300,7 @@ public class BatchEvaluationService {
                 labels == null ? null : labels.getSubjectId(),
                 labels == null ? null : labels.getGroundTruth(),
                 labels == null ? null : labels.getAttackType(),
+                isConstructed(labels),
                 labels == null ? null : labels.getDevice(),
                 labels == null ? null : labels.getLighting(),
                 claimedNic,
@@ -332,6 +333,7 @@ public class BatchEvaluationService {
                 gate.similarityPassed(),
                 gate.allPassed(),
                 gate.bindingBlocked(),
+                gate.channelBlocked(),
                 gate.passedExcludingLiveness(),
                 gate.failureReason(),
 
@@ -385,6 +387,7 @@ public class BatchEvaluationService {
                 labels == null ? null : labels.getSubjectId(),
                 labels == null ? null : labels.getGroundTruth(),
                 labels == null ? null : labels.getAttackType(),
+                isConstructed(labels),
                 labels == null ? null : labels.getDevice(),
                 labels == null ? null : labels.getLighting(),
                 claimedNic,
@@ -393,7 +396,7 @@ public class BatchEvaluationService {
                 null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null,
                 null, null,
-                false, false, false, null, null, false, null, null, null, null, 0, 0,
+                false, false, false, null, null, false, null, null, null, null, null, 0, 0,
                 missing.isEmpty() ? null : "Missing required file(s): " + missing,
                 null);
     }
@@ -663,14 +666,14 @@ public class BatchEvaluationService {
     /** Flat CSV, one row per sample - the file to load for ROC/DET/EER analysis. */
     private String toCsv(List<SampleResult> results) {
         StringBuilder csv = new StringBuilder();
-        csv.append("sampleId,analysisRef,subjectId,groundTruth,attackType,device,lighting,claimedNic,")
+        csv.append("sampleId,analysisRef,subjectId,groundTruth,attackType,constructed,device,lighting,claimedNic,")
                 .append("ocrOutcome,ocrSource,extractedNic,ocrMeanLineConfidence,")
                 .append("bindingOutcome,bindingScore,bindingEditDistance,")
                 .append("cmp1Match,cmp1Similarity,cmp2Match,cmp2Similarity,")
                 .append("cmp3Match,cmp3Similarity,cmp4Match,cmp4Similarity,cmp5Match,cmp5Similarity,")
                 .append("crossChannelStatus,crossChannelDelta,")
                 .append("nicCardCropped,selfNicCardCropped,scannedNicCardCropped,livenessScore,livenessPassed,")
-                .append("similarityPassed,allPassed,bindingBlocked,gatePassedExLiveness,failureReason,documentLatencyMs,faceLatencyMs,error,")
+                .append("similarityPassed,allPassed,bindingBlocked,channelBlocked,decisionWithoutLiveness,failureReason,documentLatencyMs,faceLatencyMs,error,")
                 // The proposed rule. Both verdicts sit on one row so a paired test needs no join.
                 .append("proposedDecision,proposedDrivers,proposedReason,")
                 .append("gDocumentPortraitState,gDocumentPortraitScore,gCoPresenceState,gCoPresenceScore,")
@@ -680,7 +683,7 @@ public class BatchEvaluationService {
         for (SampleResult r : results) {
             csv.append(String.join(",",
                     q(r.sampleId()), q(r.analysisRef()), q(r.subjectId()), q(r.groundTruth()), q(r.attackType()),
-                    q(r.device()), q(r.lighting()), q(r.claimedNic()),
+                    n(r.constructed()), q(r.device()), q(r.lighting()), q(r.claimedNic()),
                     q(r.ocrOutcome()), q(r.ocrSource()), q(r.extractedNic()), n(r.ocrMeanLineConfidence()),
                     q(r.bindingOutcome()), n(r.bindingScore()), n(r.bindingEditDistance()),
                     n(r.cmp1Match()), n(r.cmp1Similarity()), n(r.cmp2Match()), n(r.cmp2Similarity()),
@@ -691,7 +694,7 @@ public class BatchEvaluationService {
                     String.valueOf(r.scannedNicCardCropped()),
                     n(r.livenessScore()), n(r.livenessPassed()),
                     String.valueOf(r.similarityPassed()), n(r.allPassed()), n(r.bindingBlocked()),
-                    n(r.gatePassedExLiveness()), q(r.failureReason()),
+                    n(r.channelBlocked()), n(r.decisionWithoutLiveness()), q(r.failureReason()),
                     String.valueOf(r.documentLatencyMs()), String.valueOf(r.faceLatencyMs()), q(r.error()),
                     q(p(r, ProposedDecision::decision)), q(p(r, ProposedDecision::drivers)),
                     q(p(r, ProposedDecision::reason)),
@@ -751,11 +754,23 @@ public class BatchEvaluationService {
         return value == null ? "" : String.valueOf(value);
     }
 
+    /**
+     * Whether the labels mark this sample as assembled rather than captured. Absent means captured:
+     * every sample predates the flag, and a missing marker must not silently imply "constructed".
+     */
+    private static Boolean isConstructed(SampleLabels labels) {
+        if (labels == null || labels.getExtra() == null) {
+            return null;
+        }
+        String v = labels.getExtra().get("constructed");
+        return v == null ? null : Boolean.valueOf("true".equalsIgnoreCase(v.trim()));
+    }
+
     private static SampleResult errorResult(String sampleId, String message) {
-        return new SampleResult(sampleId, null, null, null, null, null, null, null,
+        return new SampleResult(sampleId, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null,
                 null, null,
-                false, false, false, null, null, false, null, null, null, null, 0, 0, message, null);
+                false, false, false, null, null, false, null, null, null, null, null, 0, 0, message, null);
     }
 }

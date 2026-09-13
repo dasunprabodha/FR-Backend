@@ -68,6 +68,7 @@ final class EvaluationCsv {
                 row.str("subjectId"),
                 row.str("groundTruth"),
                 row.str("attackType"),
+                row.bool("constructed"),
                 row.str("device"),
                 row.str("lighting"),
                 row.str("claimedNic"),
@@ -100,7 +101,10 @@ final class EvaluationCsv {
                 Boolean.TRUE.equals(row.bool("similarityPassed")),
                 row.bool("allPassed"),
                 row.bool("bindingBlocked"),
-                row.bool("gatePassedExLiveness"),
+                row.bool("channelBlocked"),
+                // Older runs wrote this under its previous name; accept both so archived runs reload.
+                row.bool("decisionWithoutLiveness") != null
+                        ? row.bool("decisionWithoutLiveness") : row.bool("gatePassedExLiveness"),
                 row.str("failureReason"),
 
                 row.lng("documentLatencyMs"),
