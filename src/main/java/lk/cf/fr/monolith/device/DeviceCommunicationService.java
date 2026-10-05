@@ -152,6 +152,53 @@ public class DeviceCommunicationService {
     }
 
     /**
+     * Asks the device to begin mirroring its screen back over this same WebSocket as a series of
+     * {@code screen-frame} messages. Used only by {@code ScreenPreviewService}.
+     *
+     * <p>{@code fps}/{@code maxWidth}/{@code quality} are advisory hints, not a contract: the
+     * device is free to send fewer or smaller frames (and should, on a slow link). Preview is
+     * strictly best-effort - the boolean return says only whether the command reached the socket,
+     * and every failure here is swallowed rather than propagated, because no verification outcome
+     * may ever depend on whether somebody happened to be watching the screen.
+     *
+     * @return true if the command was written to the device's session
+     */
+    public boolean startScreenPreview(String deviceId, int fps, int maxWidth, int quality) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("deviceId", deviceId);
+        data.put("fps", fps);
+        data.put("maxWidth", maxWidth);
+        data.put("quality", quality);
+        return sendPreviewControl(deviceId, "start-screen-preview", data);
+    }
+
+    /** Asks the device to stop mirroring its screen. Best-effort, exactly like the start above. */
+    public boolean stopScreenPreview(String deviceId) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("deviceId", deviceId);
+        return sendPreviewControl(deviceId, "stop-screen-preview", data);
+    }
+
+    private boolean sendPreviewControl(String deviceId, String type, Map<String, Object> data) {
+        if (!sessionRegistry.isOnline(deviceId, CLIENT_TYPE)) {
+            log.debug("[Device] Skipping {} - device {} is offline", type, deviceId);
+            return false;
+        }
+        Map<String, Object> message = new LinkedHashMap<>();
+        message.put("type", type);
+        message.put("data", data);
+        try {
+            // sendDirect, not send: preview control must not take the device's busy slot (§ see
+            // DeviceSessionRegistry.sendDirect) or it would collide with a live verification.
+            sessionRegistry.sendDirect(deviceId, CLIENT_TYPE, objectMapper.writeValueAsString(message));
+            return true;
+        } catch (Exception e) {
+            log.warn("[Device] Failed to send {} to {}: {}", type, deviceId, e.toString());
+            return false;
+        }
+    }
+
+    /**
      * Returns a future that resolves once the device reports its on-device liveness challenge
      * has finished. Safe to call before or after the device's message actually arrives - whichever
      * happens first creates the shared future (see {@link #onLivenessComplete}).

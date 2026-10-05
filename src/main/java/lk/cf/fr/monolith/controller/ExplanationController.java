@@ -2,13 +2,19 @@ package lk.cf.fr.monolith.controller;
 
 import lk.cf.fr.monolith.explain.DecisionExplanation;
 import lk.cf.fr.monolith.explain.DecisionExplanationService;
+import lk.cf.fr.monolith.explain.EvidenceImage;
+import lk.cf.fr.monolith.explain.EvidenceImageService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Duration;
+import java.util.List;
 
 /**
  * Read-only explanation API backing the Evidence Dashboard.
@@ -31,6 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class ExplanationController {
 
     private final DecisionExplanationService decisionExplanationService;
+    private final EvidenceImageService evidenceImageService;
 
     @GetMapping(value = "/{referenceId}/evidence", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<DecisionExplanation> byReferenceId(@PathVariable String referenceId) {
@@ -40,5 +47,19 @@ public class ExplanationController {
     @GetMapping(value = "/by-id/{id}/evidence", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<DecisionExplanation> byId(@PathVariable Long id) {
         return ResponseEntity.ok(decisionExplanationService.explainById(id));
+    }
+
+    /** The images available for this attempt - captures, card crops and per-comparison face pairs. */
+    @GetMapping(value = "/{referenceId}/images", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<List<EvidenceImage>> images(@PathVariable String referenceId) {
+        return ResponseEntity.ok(evidenceImageService.list(referenceId));
+    }
+
+    /** One image by its catalogue key. Served as an {@code <img src>}, like the approval preview. */
+    @GetMapping(value = "/{referenceId}/images/{key}", produces = MediaType.IMAGE_JPEG_VALUE)
+    public ResponseEntity<byte[]> image(@PathVariable String referenceId, @PathVariable String key) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(Duration.ofMinutes(10)).cachePrivate())
+                .body(evidenceImageService.read(referenceId, key));
     }
 }

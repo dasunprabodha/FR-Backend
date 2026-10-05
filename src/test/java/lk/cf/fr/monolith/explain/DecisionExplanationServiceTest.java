@@ -296,4 +296,51 @@ class DecisionExplanationServiceTest {
         assertTrue(x.notes().stream().anyMatch(n -> n.contains("hosted AWS APIs")),
                 "must not be presented as explaining how the scores were produced");
     }
+
+    /** A batch-harness replay: fixed EVALUATION status, no liveness channel, binding gated. */
+    private RegistrationRecord replayRecord() {
+        RegistrationRecord r = passingRecord();
+        r.setStatus("EVALUATION");
+        r.setLivenessPassed(null);
+        r.setLivenessScore(null);
+        r.setNicBindingGated(true);
+        return r;
+    }
+
+    @Test
+    @DisplayName("A replay whose gated evidence all passed is reported as passed, not routed to review")
+    void replayWithAllGatedEvidencePassingIsPassed() {
+        DecisionExplanation x = service.explain(replayRecord());
+
+        assertTrue(x.passed(), "EVALUATION is a fixed marker on replays, not a verdict");
+        assertFalse(x.primaryReason().contains("Routed for human review"));
+        assertFalse(find(x, "liveness").gated(), "a replay has no liveness channel; the gate excluded it");
+        assertTrue(x.decisionRule().contains("offline evaluation replay"));
+    }
+
+    @Test
+    @DisplayName("A replay with a recorded failure reason is still reported as failed")
+    void replayWithFailureReasonIsNotPassed() {
+        RegistrationRecord r = replayRecord();
+        r.setFailureReason("BINDING_MISMATCH");
+        r.setNicBindingOutcome("MISMATCH");
+        r.setNicBindingScore(0.2);
+
+        assertFalse(service.explain(r).passed());
+    }
+
+    @Test
+    @DisplayName("When cmp5 is gated, a failing cmp5 fails a replay even with no recorded reason")
+    void replayBlockedByGatedComparison5IsNotPassed() {
+        ReflectionTestUtils.setField(service, "channelGated", true);
+        RegistrationRecord r = replayRecord();
+        r.setMatch5(false);
+        r.setFifthSimilarity(40.0);
+
+        DecisionExplanation x = service.explain(r);
+
+        assertFalse(x.passed(), "older replay rows recorded no reason for a cmp5 block");
+        assertTrue(find(x, "face.cmp5").gated());
+        assertTrue(find(x, "face.cmp5").decisive());
+    }
 }

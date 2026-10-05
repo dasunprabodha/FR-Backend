@@ -23,6 +23,37 @@ import java.util.List;
 @ConditionalOnProperty(name = "aws.enabled", havingValue = "true")
 public class RekognitionFaceRecognitionService implements FaceRecognitionService {
 
+    /** Above this, a single Rekognition round trip is worth flagging as a connection problem. */
+    private static final long SLOW_CALL_WARN_MS = 5_000;
+
+    /** Inline image size in bytes, or -1 when the image is an S3 reference rather than inline bytes. */
+    private static int inlineBytes(Image image) {
+        return image != null && image.bytes() != null ? image.bytes().asByteArrayUnsafe().length : -1;
+    }
+
+    private static String describeBytes(int bytes) {
+        if (bytes < 0) return "s3-ref";
+        if (bytes < 1024) return bytes + "B";
+        if (bytes < 1024 * 1024) return Math.round(bytes / 1024.0) + "KB";
+        return String.format("%.2fMB", bytes / (1024.0 * 1024.0));
+    }
+
+    /**
+     * Effective upload rate, but <b>only for calls slow enough for it to mean anything</b>.
+     *
+     * <p>Dividing bytes by duration is a fair estimate when a call spent its life pushing image
+     * data up a slow link. It is nonsense for a request the service rejected in under a second -
+     * there, the figure describes a round trip that was never bandwidth-bound, and printing it
+     * invites exactly the wrong conclusion. So a fast call reports no rate at all.
+     */
+    private static String throughputSuffix(int bytes, long elapsedMs) {
+        if (bytes <= 0 || elapsedMs < SLOW_CALL_WARN_MS) {
+            return "";
+        }
+        double kbPerSec = (bytes / 1024.0) / (elapsedMs / 1000.0);
+        return String.format(" | effective upload %.1f KB/s (~%.0f kbps)", kbPerSec, kbPerSec * 8);
+    }
+
     private final RekognitionClient rekognitionClient;
     private final String bucket;
     private final float similarityCutoff;
@@ -71,11 +102,44 @@ public class RekognitionFaceRecognitionService implements FaceRecognitionService
      * target image", rather than conflating that with "a face was found but scored low".
      */
     private ComparisonResult compare(Image source, Image target) {
-        CompareFacesResponse response = rekognitionClient.compareFaces(CompareFacesRequest.builder()
-                .sourceImage(source)
-                .targetImage(target)
-                .similarityThreshold(0f)
-                .build());
+        // Registration makes five of these back to back inside one synchronous HTTP request, so a
+        // slow link shows up to the operator as an unexplained stall. The byte counts are logged
+        // alongside the timing because the two are only useful together: 70 seconds means nothing
+        // until you know whether it was pushing 40 KB or 3 MB, and that ratio is the difference
+        // between "the network is broken" and "we are sending needlessly large images".
+        int sourceBytes = inlineBytes(source);
+        int targetBytes = inlineBytes(target);
+        int totalBytes = Math.max(sourceBytes, 0) + Math.max(targetBytes, 0);
+
+        long startedAt = System.currentTimeMillis();
+        CompareFacesResponse response;
+        try {
+            response = rekognitionClient.compareFaces(CompareFacesRequest.builder()
+                    .sourceImage(source)
+                    .targetImage(target)
+                    .similarityThreshold(0f)
+                    .build());
+        } catch (RuntimeException e) {
+            // The failure path is the one that most needs these numbers: without them a timeout
+            // says only "70000 millis elapsed", with no indication of how much data never made it.
+            long failedAfterMs = System.currentTimeMillis() - startedAt;
+            log.error("[CompareFaces] FAILED after {}ms | payload source={} target={} total={}{} | {}",
+                    failedAfterMs, describeBytes(sourceBytes), describeBytes(targetBytes),
+                    describeBytes(totalBytes), throughputSuffix(totalBytes, failedAfterMs),
+                    e.getClass().getSimpleName());
+            throw e;
+        }
+        long latencyMs = System.currentTimeMillis() - startedAt;
+
+        if (latencyMs > SLOW_CALL_WARN_MS) {
+            log.warn("[CompareFaces] SLOW: {}ms for {} (source={} target={}){} | "
+                            + "registration issues five of these in sequence",
+                    latencyMs, describeBytes(totalBytes), describeBytes(sourceBytes),
+                    describeBytes(targetBytes), throughputSuffix(totalBytes, latencyMs));
+        } else {
+            log.debug("[CompareFaces] {}ms for {} (source={} target={})",
+                    latencyMs, describeBytes(totalBytes), describeBytes(sourceBytes), describeBytes(targetBytes));
+        }
 
         FaceBoundingBox sourceFaceBox = response.sourceImageFace() != null
                 ? toFaceBoundingBox(response.sourceImageFace().boundingBox())
@@ -95,8 +159,8 @@ public class RekognitionFaceRecognitionService implements FaceRecognitionService
         float similarity = bestMatch.similarity();
         boolean isMatch = similarity >= similarityCutoff;
         FaceBoundingBox targetFaceBox = bestMatch.face() != null ? toFaceBoundingBox(bestMatch.face().boundingBox()) : null;
-        log.info("[CompareFaces] similarity={} cutoff={} -> match={} ({} candidate face(s) compared)",
-                similarity, similarityCutoff, isMatch, matches.size());
+        log.info("[CompareFaces] similarity={} cutoff={} -> match={} ({} candidate face(s) compared, {}ms)",
+                similarity, similarityCutoff, isMatch, matches.size(), latencyMs);
         // Explicit widening: Java will not autobox a float straight to Double.
         return new ComparisonResult(isMatch, (double) similarity, response.toString(), sourceFaceBox, targetFaceBox);
     }

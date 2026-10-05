@@ -291,7 +291,7 @@ public class BatchEvaluationService {
                 dependencyAwareDecisionService.decide(faces, liveness, document.binding());
 
         if (persistEvidence) {
-            persistAttempt(analysisRef, claimedNic, labels, document, faces, liveness, gate);
+            persistAttempt(analysisRef, sampleDir, claimedNic, labels, document, faces, liveness, gate);
         }
 
         return new SampleResult(
@@ -436,7 +436,7 @@ public class BatchEvaluationService {
      * it later with no special-casing - the evidence view then works identically for a live
      * registration and for a corpus sample.
      */
-    private void persistAttempt(String analysisRef, String claimedNic, SampleLabels labels,
+    private void persistAttempt(String analysisRef, Path sampleDir, String claimedNic, SampleLabels labels,
                                  RegistrationAnalysisService.DocumentAnalysis document,
                                  RegistrationAnalysisService.FaceAnalysis faces,
                                  LivenessOutcome liveness,
@@ -486,6 +486,13 @@ public class BatchEvaluationService {
         record.setNicBindingGated(gate.bindingGated());
         record.setFailureReason(gate.failureReason());
         record.setImagesUploadedToS3(false);
+
+        // Where the captures came from, so the Evidence Dashboard can show them. These rows never
+        // reach the approval workflow (status EVALUATION), so nothing will try to upload them.
+        Path dir = sampleDir.toAbsolutePath().normalize();
+        record.setNicImageRef(dir.resolve(NIC_IMAGE).toString());
+        record.setFaceImageRef(dir.resolve(FACE_IMAGE).toString());
+        record.setSelfImageRef(dir.resolve(SELF_IMAGE).toString());
 
         long elapsed = document.latencyMs() + faces.latencyMs();
         LocalDateTime now = LocalDateTime.now();

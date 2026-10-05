@@ -25,8 +25,7 @@ import static org.bytedeco.opencv.global.opencv_imgproc.resize;
  * ("Request has invalid image format") names neither the offending part nor the format that was
  * actually sent. The uploaded {@code scannedNIC} part previously travelled from the multipart
  * request straight into {@code DetectText} as raw bytes, so any other image type the browser was
- * willing to hand over - HEIC/HEIF from an iPhone, WebP, BMP, TIFF, GIF, or a PDF dropped onto the
- * upload zone, which bypasses the file picker's {@code accept} filter entirely - produced that
+ * willing to hand over - HEIC/HEIF from an iPhone, WebP, BMP, TIFF or GIF - produced that
  * opaque 400 deep inside the pipeline rather than a usable error at the boundary.
  *
  * <p><b>JPEG and PNG pass through byte-for-byte untouched.</b> That is deliberate: re-encoding
@@ -38,6 +37,11 @@ import static org.bytedeco.opencv.global.opencv_imgproc.resize;
  * <p>Formats OpenCV can decode (WebP, BMP, TIFF, GIF, ...) are transcoded to JPEG. HEIC/HEIF is
  * not among them - the OpenCV build bundled with javacv-platform is compiled without libheif - so
  * it is rejected with a message that says so, instead of failing obscurely one layer down.
+ *
+ * <p><b>PDF is handled separately, before any of the above.</b> It is not an image container at
+ * all, so it is rendered to a page image by {@link PdfPageRasteriser} and the result re-enters
+ * this method as ordinary image bytes. Scanners and "scan to email" produce PDFs by default, so
+ * refusing them pushed a manual convert-to-JPEG step onto the teller for no technical reason.
  */
 @Slf4j
 public final class RekognitionImageNormaliser {
@@ -70,6 +74,16 @@ public final class RekognitionImageNormaliser {
 
         ImageSignature signature = ImageSignature.sniff(imageBytes);
 
+        // A PDF is a document, not an image container - neither Rekognition nor OpenCV can read
+        // one. Render it to a page image and start over, so everything below (size limit,
+        // pass-through, transcoding) applies to the rendered page exactly as it would to an
+        // uploaded photo. Recursion is bounded: the rasteriser always returns PNG.
+        if (signature == ImageSignature.PDF) {
+            log.info("[ImageNormalise] {} is {} ({} bytes) - rendering its first page to an image",
+                    partName, signature, imageBytes.length);
+            return normalise(PdfPageRasteriser.renderFirstPageToPng(imageBytes, partName), partName);
+        }
+
         if (signature.acceptedByRekognition()) {
             if (imageBytes.length <= MAX_BYTES) {
                 log.debug("[ImageNormalise] {} is {} ({} bytes) - passing through unchanged",
@@ -97,7 +111,6 @@ public final class RekognitionImageNormaliser {
         return switch (signature) {
             case HEIF -> base + "iPhone HEIC/HEIF photos are not supported - export or re-save the "
                     + "image as JPEG or PNG and upload it again.";
-            case PDF -> base + "Please upload a photo or scan of the card as a JPEG or PNG image, not a PDF.";
             case GIF -> base + "GIF is not supported - re-save the image as JPEG or PNG and upload it again.";
             default -> base + "Please upload a JPEG or PNG image.";
         };
@@ -201,6 +214,11 @@ public final class RekognitionImageNormaliser {
         GIF("a GIF image", false, false),
         TIFF("a TIFF image", false, true),
         HEIF("an HEIC/HEIF image", false, false),
+        /**
+         * Both flags are false and stay false: Rekognition cannot read a PDF and neither can
+         * OpenCV. It never reaches either check, because {@link #normalise} intercepts it first
+         * and replaces it with a rendered page image.
+         */
         PDF("a PDF document", false, false),
         UNKNOWN("not a recognised image format", false, true);
 

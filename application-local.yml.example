@@ -56,3 +56,8 @@ aws:
 # verification:
 #   similarity-threshold: 80
 #   liveness-confidence-threshold: 65
+#   # Keeps the reference + audit stills AWS returns with each liveness verdict, under
+#   # base-dir/<livenessSessionId>/. On by default; set false to discard them as before.
+#   liveness-image-dump:
+#     enabled: true
+#     base-dir: ./data/liveness-images

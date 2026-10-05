@@ -10,9 +10,13 @@ import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rekognition.RekognitionClient;
 import software.amazon.awssdk.services.s3.S3Client;
+
+import java.time.Duration;
 
 /**
  * AWS Rekognition/S3 clients - ported from cf-fr-server Face_Recognition/configuration/AwsClientsConfig.java.
@@ -40,6 +44,18 @@ public class AwsClientsConfig {
 
     @Value("${aws.session-token:}")
     private String sessionToken;
+
+    @Value("${aws.timeouts.attempt-seconds:25}")
+    private int attemptTimeoutSeconds;
+
+    @Value("${aws.timeouts.call-seconds:70}")
+    private int callTimeoutSeconds;
+
+    @Value("${aws.timeouts.max-retries:2}")
+    private int maxRetries;
+
+    @Value("${aws.timeouts.slow-call-log-ms:5000}")
+    private long slowCallLogMs;
 
     /**
      * Resolves credentials and, importantly, says so at startup.
@@ -88,13 +104,55 @@ public class AwsClientsConfig {
         return provider;
     }
 
+    /**
+     * Bounds how long a single AWS call may take.
+     *
+     * <p>The SDK's defaults are wrong for this application: {@code apiCallTimeout} and
+     * {@code apiCallAttemptTimeout} are both unset (i.e. unlimited), leaving only the HTTP
+     * client's 30s socket timeout and three automatic retries. On a slow or flapping uplink one
+     * CompareFaces can therefore occupy roughly 4 x 30s plus backoff before it either succeeds or
+     * gives up - and registration makes <b>five</b> of those calls sequentially, plus DetectText,
+     * inside a single synchronous HTTP request that the operator's browser is blocked on.
+     *
+     * <p>Observed in practice: comparison 1 took 102 seconds and comparison 2 a further 16, with
+     * the registration appearing to hang and no error ever reaching the console. Unbounded, that
+     * is indistinguishable from a deadlock from the outside.
+     *
+     * <p>These caps turn that into a bounded, reported failure. They are deliberately generous -
+     * these calls carry image payloads of a few hundred KB, which is genuinely slow on a poor
+     * connection - and configurable, so a site on a worse link can raise them rather than being
+     * forced to choose between hanging and failing.
+     */
+    private ClientOverrideConfiguration timeouts() {
+        return ClientOverrideConfiguration.builder()
+                // Per attempt: how long one HTTP exchange may take before it is abandoned/retried.
+                .apiCallAttemptTimeout(Duration.ofSeconds(attemptTimeoutSeconds))
+                // Across all attempts: the hard ceiling one logical call can add to a request.
+                .apiCallTimeout(Duration.ofSeconds(callTimeoutSeconds))
+                .retryPolicy(RetryPolicy.builder().numRetries(maxRetries).build())
+                // Prints a per-attempt breakdown whenever a call is slow or fails, so the cause
+                // can be read off the log instead of inferred from timestamp gaps.
+                .addMetricPublisher(new AwsCallMetricsPublisher(slowCallLogMs))
+                .build();
+    }
+
     @Bean
     public RekognitionClient rekognitionClient(@Value("${aws.region}") String region, AwsCredentialsProvider creds) {
-        return RekognitionClient.builder().region(Region.of(region)).credentialsProvider(creds).build();
+        log.info("[AWS] Rekognition client timeouts: attempt={}s, total={}s, retries={}",
+                attemptTimeoutSeconds, callTimeoutSeconds, maxRetries);
+        return RekognitionClient.builder()
+                .region(Region.of(region))
+                .credentialsProvider(creds)
+                .overrideConfiguration(timeouts())
+                .build();
     }
 
     @Bean
     public S3Client s3Client(@Value("${aws.region}") String region, AwsCredentialsProvider creds) {
-        return S3Client.builder().region(Region.of(region)).credentialsProvider(creds).build();
+        return S3Client.builder()
+                .region(Region.of(region))
+                .credentialsProvider(creds)
+                .overrideConfiguration(timeouts())
+                .build();
     }
 }

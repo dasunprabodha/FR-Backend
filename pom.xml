@@ -97,6 +97,17 @@
             <version>1.5.9</version>
         </dependency>
 
+        <!-- Apache PDFBox: rasterises an uploaded PDF scannedNIC to an image so it can enter the
+             same OCR/card-detect/face-compare pipeline as a JPEG or PNG. Needed because tellers
+             routinely receive a scanned NIC as a PDF from a scanner or a customer's email, and
+             Rekognition accepts JPEG/PNG only - see image/RekognitionImageNormaliser. Rendering
+             is the only thing used from it; no PDF is ever written or stored. -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.8</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

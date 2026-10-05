@@ -2,6 +2,7 @@ package lk.cf.fr.monolith.device;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lk.cf.fr.monolith.preview.ScreenPreviewService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -10,6 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -20,7 +22,9 @@ import java.util.regex.Pattern;
  *
  * <p>Only the message types actually used by the verification path are handled: {@code hello},
  * {@code image}, {@code camera-timeout-no-face}, {@code camera-cancelled-by-user}, and the
- * liveness-completion signals. Registration/activation-only message types
+ * liveness-completion signals, plus the screen-preview stream
+ * ({@code screen-frame}, {@code screen-preview-started/-stopped/-error}).
+ * Registration/activation-only message types
  * ({@code activate}, {@code request-liveness-session}, {@code liveness-cancelled}) are out of
  * scope for this MVP.
  */
@@ -33,8 +37,13 @@ public class DeviceWebSocketHandler implements WebSocketHandler {
     private static final long TIMESTAMP_SKEW_MS = 30_000;
     private static final long MESSAGE_DEDUP_TTL_MS = 30_000;
 
+    /** Screen-preview traffic, routed on the fast path below rather than through the switch. */
+    private static final Set<String> PREVIEW_TYPES = Set.of(
+            "screen-frame", "screen-preview-started", "screen-preview-stopped", "screen-preview-error");
+
     private final DeviceSessionRegistry sessionRegistry;
     private final DeviceCommunicationService deviceCommunicationService;
+    private final ScreenPreviewService screenPreviewService;
     private final ObjectMapper objectMapper;
 
     /** messageId -> received-at epoch millis, cheap replay protection matching legacy WebSocketConfig.seenMessageIds. */
@@ -56,6 +65,20 @@ public class DeviceWebSocketHandler implements WebSocketHandler {
         try {
             JsonNode root = objectMapper.readTree(payload);
 
+            String type = root.hasNonNull("type") ? root.get("type").asText().toLowerCase() : "";
+            JsonNode data = root.has("data") ? root.get("data") : objectMapper.createObjectNode();
+
+            // Screen-preview traffic skips the freshness and replay gates below, deliberately.
+            // Those gates CLOSE the session on a violation, which is right for a transactional
+            // message but catastrophic here: frames arrive several times a second, so one late
+            // burst after a network stall would tear down the very session an in-flight
+            // verification is waiting on for its capture image. A stale or repeated frame is
+            // worth nothing anyway - dropping it costs the viewer a fraction of a second.
+            if (PREVIEW_TYPES.contains(type)) {
+                handlePreviewMessage(session, type, data);
+                return;
+            }
+
             if (!root.hasNonNull("timestamp")) {
                 closeQuietly(session, CloseStatus.POLICY_VIOLATION);
                 return;
@@ -76,9 +99,6 @@ public class DeviceWebSocketHandler implements WebSocketHandler {
                 log.warn("[WS] Duplicate messageId={} dropped sid={}", messageId, session.getId());
                 return;
             }
-
-            String type = root.hasNonNull("type") ? root.get("type").asText().toLowerCase() : "";
-            JsonNode data = root.has("data") ? root.get("data") : objectMapper.createObjectNode();
 
             switch (type) {
                 case "hello" -> handleHello(session, data);
@@ -103,7 +123,11 @@ public class DeviceWebSocketHandler implements WebSocketHandler {
 
     @Override
     public void afterConnectionClosed(@NonNull WebSocketSession session, @NonNull CloseStatus closeStatus) {
+        // Read the deviceId first: unregister() drops the mapping, and the preview hub needs it to
+        // tell any watching console the device has gone offline.
+        String deviceId = deviceIdOf(session, null);
         sessionRegistry.unregister(session);
+        screenPreviewService.onDeviceDisconnected(deviceId);
         log.info("[WS] Connection closed sid={} status={}", session.getId(), closeStatus);
     }
 
@@ -117,6 +141,35 @@ public class DeviceWebSocketHandler implements WebSocketHandler {
         String clientType = data.hasNonNull("clientType") ? data.get("clientType").asText() : "fr";
         sessionRegistry.register(deviceId, session, clientType);
         log.info("[WS] hello sid={} deviceId={} clientType={}", session.getId(), deviceId, clientType);
+        // Only now is the device routable, so this is the earliest point a preview can be resumed
+        // for a console that was already waiting on it.
+        screenPreviewService.onDeviceConnected(deviceId);
+    }
+
+    private void handlePreviewMessage(WebSocketSession session, String type, JsonNode data) {
+        String deviceId = deviceIdOf(session, data);
+        if (deviceId == null) {
+            log.debug("[WS] Preview message type={} from an unregistered session sid={}, ignored",
+                    type, session.getId());
+            return;
+        }
+        if ("screen-frame".equals(type)) {
+            screenPreviewService.onDeviceFrame(deviceId, data);
+        } else {
+            screenPreviewService.onDeviceStatus(deviceId, type, data);
+        }
+    }
+
+    /**
+     * The deviceId this session registered under at "hello", falling back to the one carried in
+     * the message body for a session that has not said hello yet.
+     */
+    private String deviceIdOf(WebSocketSession session, JsonNode data) {
+        DeviceSessionRegistry.SessionInfo info = sessionRegistry.getSessionInfo(session);
+        if (info != null && info.deviceId() != null) {
+            return info.deviceId();
+        }
+        return data == null ? null : textOrNull(data, "deviceId");
     }
 
     private void handleImage(JsonNode data) {

@@ -222,3 +222,163 @@ whoever builds or tests the caller side)
    `FR_SERVER_WS_URL` (via `gradle.properties`) and `network_security_config.xml`.
 4. Decide whether AWS Rekognition (`aws.enabled=true`) should be turned on for either side before
    any non-local testing, since the mock services currently drive all match/liveness outcomes.
+
+## 11. Screen Preview (device screen casting to the operator console)
+
+**Status**: backend and Angular console implemented and tested end-to-end against a simulated
+device. **The Android side is not implemented yet** — this section is the contract to build to.
+
+### Why it exists
+
+The teller driving `POST /api/validation` cannot see the customer-facing device, so they have no
+idea whether the customer is on the right screen, has their face framed, or is stuck. This mirrors
+the device screen into the verification page of the console while a capture is in progress.
+
+### Where it rides
+
+**On the device's existing `/device/ws-endpoint` session** — no second socket, no new handshake,
+no new headers. The console has its own separate socket to the backend
+(`/ws/screen-preview`), and the backend relays between the two
+(`preview/ScreenPreviewService`).
+
+**Both capture paths.** Verification (one capture) and registration (three sequential captures
+plus the OCR check) each show the panel on their own page. Nothing in the relay is path-aware:
+`ScreenPreviewService` keys purely on `deviceId`, and both paths resolve the same device through
+the same `DeviceResolutionService.resolveActiveDeviceOrFail(branchId, deviceNickname, userId)`.
+Adding registration therefore needed **no backend change at all** — only the Angular page.
+For the device this means one implementation covers both flows; there is no per-flow behaviour to
+branch on, and no reason to look at `flow`/`tag` when deciding whether to stream.
+
+### Messages the device must handle (backend → device)
+
+Both follow the same envelope the existing `liveness-session-created` push uses — `type` + `data`,
+**no** `timestamp`/`messageId` on backend-originated messages (consistent with `open-camera` and
+`liveness-session-created` today).
+
+```json
+{"type":"start-screen-preview","data":{"deviceId":"88806537","fps":6,"maxWidth":480,"quality":50}}
+{"type":"stop-screen-preview","data":{"deviceId":"88806537"}}
+```
+
+`fps` / `maxWidth` / `quality` are **hints, not a contract** — send fewer/smaller frames if the
+device or link cannot keep up. Defaults come from `screen-preview.*` in `application.yml`.
+
+The device gets `start-screen-preview` when the **first** console starts watching it and
+`stop-screen-preview` when the **last** one stops (including when the operator navigates away or
+closes the tab). Both are idempotent: a second `start` while already streaming should be treated
+as "keep going", not as a reason to open a second capture.
+
+### Messages the device sends (device → backend)
+
+Frames, as fast as `fps` allows, `content` being a **standard** base64 JPEG (not URL-safe — the
+console binds it straight into an `<img src="data:image/jpeg;base64,…">` and the browser's
+sanitiser rejects the URL-safe alphabet):
+
+```json
+{"type":"screen-frame","timestamp":1757000000000,"messageId":"<uuid>",
+ "data":{"deviceId":"88806537","format":"jpeg","width":360,"height":780,"seq":41,
+         "content":"<base64 jpeg>"}}
+```
+
+Acknowledgements, so the console can tell "device refused" apart from "no frames yet":
+
+```json
+{"type":"screen-preview-started","data":{"deviceId":"88806537"}}
+{"type":"screen-preview-stopped","data":{"deviceId":"88806537"}}
+{"type":"screen-preview-error","data":{"deviceId":"88806537","message":"Screen capture permission denied"}}
+```
+
+`screen-preview-error` is the right reply whenever the device cannot produce frames (permission
+refused, capture unavailable) — the console shows that message to the teller instead of spinning
+forever.
+
+### How to produce the frames — do NOT reach for MediaProjection first
+
+The backend only wants a JPEG; it does not care how the app made it. The app is mirroring **its
+own** screen, so the system screen-capture/cast mechanism is not needed, and avoiding it is
+actively better:
+
+| Approach | API | Permission | Notes |
+|---|---|---|---|
+| **Camera frames** (recommended) | CameraX `ImageAnalysis`, or `TextureView.getBitmap()` | none beyond CAMERA | Tap the existing analyzer with `STRATEGY_KEEP_ONLY_LATEST`, throttle to ~`fps`, YUV→JPEG. Shows the one thing the teller needs: is the face framed. |
+| **`PixelCopy.request(window, …)`** | API 24+ | none | Captures the whole window **including** the camera surface, so the UI chrome (oval guide, prompts) comes too. |
+| `View.draw(Canvas)` | any | none | **Not sufficient alone** — a `PreviewView`/`SurfaceView` renders on a separate hardware layer, leaving a black hole where the camera preview should be. |
+| `MediaProjection` | API 21+ | consent dialog every start | Last resort. See below. |
+
+Why MediaProjection is the wrong default here:
+- If the capture activity sets `FLAG_SECURE` — plausible for an eKYC screen — MediaProjection
+  yields **black frames**. In-app capture is unaffected.
+- A managed device can carry `DevicePolicyManager.setScreenCaptureDisabled(true)`, which kills it.
+- Android 14+ additionally requires a `mediaProjection`-typed foreground service.
+
+Whichever source is used, honour `imageProxy.imageInfo.rotationDegrees` (or the display rotation)
+before encoding, or the teller sees a sideways face. Aspect ratio needs no special handling: the
+console reads `width`/`height` off each frame and resizes its stage to match, so camera-shaped
+4:3 frames render correctly rather than being stretched into a phone shape.
+
+### Rules the device implementation must respect
+
+1. **Never block or delay a capture for a frame.** The capture `image` reply travels on this same
+   socket. If the socket is congested, drop frames — never the capture.
+2. **Standard base64**, matching the existing `image` message (the backend decodes both with
+   `Base64.getDecoder()`).
+3. **`timestamp` and `messageId` are still expected on `screen-frame`** for envelope consistency,
+   but the backend deliberately does **not** enforce the 30-second skew check or the duplicate
+   check on preview types (`DeviceWebSocketHandler.PREVIEW_TYPES`). A stale frame is dropped, and
+   — unlike every other message type — it will **not** close the session. This is the point:
+   a late frame burst must never tear down the socket an in-flight verification is waiting on.
+4. **Stop streaming on `stop-screen-preview`** and release the MediaProjection. The device should
+   also stop by itself if the socket drops, and must not auto-resume on reconnect — the backend
+   re-issues `start-screen-preview` after the device's `hello` if a console is still watching
+   (`ScreenPreviewService.onDeviceConnected`).
+5. **Frames are not evidence.** They are never persisted, never attached to a verification record,
+   and never influence a decision. Do not send anything on this channel you would not want a
+   teller to see live.
+
+### Backend/console pieces (already done)
+
+| Piece | File |
+|---|---|
+| Relay hub, viewer fan-out, start/stop lifecycle | `preview/ScreenPreviewService.java` |
+| Console-facing socket, device resolution from branch+nickname | `preview/ScreenPreviewWebSocketHandler.java` |
+| Endpoint registration `/ws/screen-preview` | `config/ScreenPreviewWebSocketConfig.java` |
+| Routes `screen-*` types, skips the skew/replay gates | `device/DeviceWebSocketHandler.java` |
+| `start/stopScreenPreview`, bypasses the busy slot | `device/DeviceCommunicationService.java` |
+| `sendDirect` — send without claiming the busy slot | `device/DeviceSessionRegistry.java` |
+| Console socket + signals | `FR-Frontend/src/app/core/services/screen-preview.service.ts` |
+| Console panel (shared by both pages) | `FR-Frontend/src/app/shared/components/device-preview/` |
+| Verification page wiring | `FR-Frontend/src/app/features/verification/pages/verification-page/` |
+| Registration page wiring | `FR-Frontend/src/app/features/registration/pages/registration-page/` |
+
+### Isolation from the verification path (why this cannot break verification)
+
+`DeviceSessionRegistry.send()` claims a per-device "busy slot" keyed by `referenceId` so two
+verifications cannot collide on one device. Preview control messages go through
+`sendDirect()` instead, which writes to the session **without** touching that slot — still under
+the per-session send lock, so a preview write can never interleave mid-frame with a capture write.
+Verified on both paths, against a simulated device streaming at 6 fps throughout:
+- **Verification** — `200 / status:true`, 10 preview frames delivered inside the capture window.
+- **Registration** — `200 / status:true / overallSimilarityDecision:"success"`, all three
+  `open-camera` commands (nicImage → faceImage → selfImage) delivered while streaming, 130 frames
+  relayed unbroken across the whole flow, no `DEVICE_BUSY`.
+
+### Config (`application.yml`)
+
+```yaml
+screen-preview:
+  enabled: true          # false disables the feature server-wide; the console reports it as Disabled
+  fps: 6
+  max-width: 480
+  quality: 50
+  allowed-origins: "*"   # narrow to the console's real origin outside local dev
+```
+
+### Not done / deliberate limitations
+
+- **No authentication** on `/ws/screen-preview`, matching every other endpoint in this MVP. This
+  channel carries a live view of a customer-facing screen, so it must sit behind the same network
+  boundary as the console before any real deployment.
+- **Stop is global per device**, not per viewer: if two consoles watch one device and one presses
+  Stop, the stream stops for both. Fine for a single-operator console; revisit if that changes.
+- **JPEG-over-JSON**, not WebRTC/H.264. Simple, reuses the existing socket, costs bandwidth. At
+  6 fps / 480px / q50 a frame is roughly 10-20 KB, so ~60-120 KB/s per watching console.

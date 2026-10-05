@@ -83,6 +83,28 @@ public class DecisionExplanationService {
         return Boolean.TRUE.equals(record.getNicBindingGated());
     }
 
+    /**
+     * Whether comparison 5 participates in the gate. Read from the same key the gate reads; unlike
+     * binding it has no per-attempt snapshot, so current configuration is the best available record.
+     */
+    @Value("${verification.channel-gated:false}")
+    private boolean channelGated;
+
+    /** Status the batch harness stores on replayed attempts - see {@code BatchEvaluationService}. */
+    private static final String STATUS_EVALUATION = "EVALUATION";
+
+    /**
+     * Whether this row is an offline evaluation replay rather than a live registration.
+     *
+     * <p>A replay never reaches the approval workflow, so its {@code status} is a fixed marker and
+     * says nothing about the verdict. It also has no liveness channel at all. Both facts change how
+     * the row has to be read: the verdict must come from the recorded evidence, and liveness must
+     * be excluded exactly as the gate excluded it, not reported as a missing result.
+     */
+    private static boolean isReplay(RegistrationRecord record) {
+        return STATUS_EVALUATION.equals(record.getStatus());
+    }
+
     public DecisionExplanation explainByReferenceId(String referenceId) {
         RegistrationRecord record = registrationRecordRepository.findByReferenceId(referenceId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
@@ -119,9 +141,9 @@ public class DecisionExplanationService {
         evidence.add(crossChannel(record));
         evidence.add(liveness(record, livenessThreshold));
 
-        boolean passed = isPassing(record);
         List<EvidenceItem> gatedFailures = evidence.stream()
                 .filter(EvidenceItem::gated).filter(EvidenceItem::isFailure).toList();
+        boolean passed = isPassing(record, gatedFailures);
 
         Optional<EvidenceItem> closest = evidence.stream()
                 .filter(EvidenceItem::gated)
@@ -262,7 +284,7 @@ public class DecisionExplanationService {
                 "Are the uploaded scan and the card held up to the camera the same document? Nothing else "
                         + "asks this: OCR and authenticity inspect only the upload, while the gate inspects only "
                         + "the captures.",
-                record.getMatch5(), record.getFifthSimilarity(), threshold, false,
+                record.getMatch5(), record.getFifthSimilarity(), threshold, channelGated,
                 "scannedNIC (cropped) + nicImage (cropped)");
     }
 
@@ -341,6 +363,13 @@ public class DecisionExplanationService {
         Double score = record.getLivenessScore();
         Boolean passed = record.getLivenessPassed();
 
+        if (score == null && passed == null && isReplay(record)) {
+            return new EvidenceItem("liveness", "Face liveness challenge", CAT_LIVENESS,
+                    EvidenceItem.STATUS_UNAVAILABLE, null, threshold, null, UNIT_CONFIDENCE, null,
+                    false, false, "AWS Face Liveness session",
+                    "Offline evaluation replay: there is no device liveness session, so liveness is "
+                            + "excluded from this decision - exactly as the gate excluded it.");
+        }
         if (score == null && passed == null) {
             return new EvidenceItem("liveness", "Face liveness challenge", CAT_LIVENESS,
                     EvidenceItem.STATUS_UNAVAILABLE, null, threshold, null, UNIT_CONFIDENCE, null,
@@ -363,13 +392,21 @@ public class DecisionExplanationService {
 
     /** The rule actually in force for this attempt, spelled out so the panel reads what was applied. */
     private String decisionRule(RegistrationRecord record) {
+        boolean replay = isReplay(record);
         String base = "All of: document-vs-self comparison, live-face-vs-self comparison, "
-                + "scanned-document comparison (when a document was supplied), and liveness "
-                + "must independently clear their thresholds. ";
-        return bindingWasGated(record)
+                + "scanned-document comparison (when a document was supplied)"
+                + (channelGated ? ", scan-vs-presented-card comparison (when a scan was supplied)" : "")
+                + (replay ? "" : ", and liveness")
+                + " must independently clear their thresholds. ";
+        String rule = bindingWasGated(record)
                 ? base + "The document number must also bind to the claimed NIC. Comparison 1 is "
                         + "recorded but excluded from this rule."
                 : base + "Comparison 1 and identity binding are recorded but excluded from this rule.";
+        return replay
+                ? rule + " This is an offline evaluation replay: there is no liveness channel, so the "
+                        + "verdict shown is the rule's decision on the remaining evidence, and no "
+                        + "approval workflow was involved."
+                : rule;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -398,7 +435,10 @@ public class DecisionExplanationService {
 
     private String primaryReason(RegistrationRecord record, boolean passed, List<EvidenceItem> failures) {
         if (passed) {
-            return "All gated evidence cleared its threshold, so the attempt was approved automatically.";
+            return isReplay(record)
+                    ? "All gated evidence cleared its threshold, so the rule would approve this attempt "
+                            + "automatically (offline replay, liveness excluded)."
+                    : "All gated evidence cleared its threshold, so the attempt was approved automatically.";
         }
         if (failures.isEmpty()) {
             String reason = record.getFailureReason();
@@ -530,8 +570,12 @@ public class DecisionExplanationService {
         boolean cmp3 = clears(record.getThirdSimilarity(), similarityThreshold, record.getMatch3());
         boolean cmp4 = record.getMatch4() == null && record.getFourthSimilarity() == null
                 || clears(record.getFourthSimilarity(), similarityThreshold, record.getMatch4());
-        boolean liveness = Boolean.TRUE.equals(record.getLivenessPassed());
-        return cmp2 && cmp3 && cmp4 && liveness;
+        // A replay has no liveness channel; the gate excluded it, so the baseline does too.
+        boolean liveness = isReplay(record) && record.getLivenessPassed() == null
+                || Boolean.TRUE.equals(record.getLivenessPassed());
+        boolean cmp5 = !channelGated || record.getFifthSimilarity() == null
+                || clears(record.getFifthSimilarity(), similarityThreshold, record.getMatch5());
+        return cmp2 && cmp3 && cmp4 && cmp5 && liveness;
     }
 
     /** Prefer the recorded match flag; fall back to comparing the score when it is absent. */
@@ -570,7 +614,13 @@ public class DecisionExplanationService {
 
     // ---------------------------------------------------------------------------------------
 
-    private boolean isPassing(RegistrationRecord record) {
+    private boolean isPassing(RegistrationRecord record, List<EvidenceItem> gatedFailures) {
+        if (isReplay(record)) {
+            // The status of a replay is a fixed marker, so read the verdict off what the gate
+            // recorded: no failure reason and no gated item below its threshold. Both are checked
+            // because rows written before CHANNEL_MISMATCH existed carry no reason for a cmp5 block.
+            return record.getFailureReason() == null && gatedFailures.isEmpty();
+        }
         String status = record.getStatus();
         return RegistrationApprovalStatus.AWS_APPROVED.name().equals(status)
                 || RegistrationApprovalStatus.APPROVED.name().equals(status);

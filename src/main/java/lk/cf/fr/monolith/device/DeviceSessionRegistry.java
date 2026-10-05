@@ -93,6 +93,31 @@ public class DeviceSessionRegistry {
         return true;
     }
 
+    /**
+     * Sends a message that is <b>not</b> part of a verification/registration request, bypassing the
+     * per-device busy slot entirely.
+     *
+     * <p>{@link #send} exists to guarantee one transaction at a time per physical device, and it
+     * claims the slot keyed by {@code referenceId}. Out-of-band control traffic - currently the
+     * screen-preview start/stop commands - has no referenceId and must never occupy that slot:
+     * doing so would make an idle device look busy to the next verification, or (worse) let a
+     * preview command steal the slot from a verification already using it. Such a message is
+     * therefore written straight to the session, still under the per-session send lock so it can
+     * never interleave with a concurrent transactional write on the same socket.
+     */
+    public void sendDirect(String deviceId, String clientType, String json) throws Exception {
+        WebSocketSession session = getSession(deviceId, clientType);
+        if (session == null || !session.isOpen()) {
+            throw new IllegalStateException("No open session for deviceId=" + deviceId);
+        }
+        safeSend(session, new TextMessage(json));
+    }
+
+    /** The (deviceId, clientType) a session registered under, or null if it never sent "hello". */
+    public SessionInfo getSessionInfo(WebSocketSession session) {
+        return session == null ? null : infoBySessionId.get(session.getId());
+    }
+
     private void safeSend(WebSocketSession session, WebSocketMessage<?> message) throws Exception {
         ReentrantLock lock = sendLocks.get(session.getId());
         if (lock == null) {

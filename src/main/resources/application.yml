@@ -62,6 +62,26 @@ logging:
     org.springframework.web.socket: INFO
 
 # ---------------------------------------------------------------------------
+# Device screen preview (screen casting to the operator console)
+# ---------------------------------------------------------------------------
+#
+# The device mirrors its screen as JPEG frames over the SAME /device/ws-endpoint session it
+# already uses for captures; the console watches them over /ws/screen-preview. The device only
+# streams while a console is actually watching - see preview/ScreenPreviewService.
+#
+# fps/max-width/quality are hints passed to the device in start-screen-preview. They are kept
+# deliberately modest: a preview only has to be good enough to see which screen the customer is
+# on and whether a face is framed, and every frame competes for the same socket the verification's
+# capture image has to come back on.
+screen-preview:
+  enabled: true
+  fps: 6
+  max-width: 480
+  quality: 50
+  # Matches the device endpoint's "*". Narrow this to the console's real origin outside local dev.
+  allowed-origins: "*"
+
+# ---------------------------------------------------------------------------
 # Verification MVP configuration
 # ---------------------------------------------------------------------------
 verification:
@@ -192,6 +212,18 @@ verification:
 
   device-image-timeout-seconds: 120
   liveness-wait-timeout-seconds: 60
+
+  # AWS returns a reference image plus `auditImagesLimit` audit images (currently 2, set in
+  # RekognitionLivenessService.createSession) inside every GetFaceLivenessSessionResults response.
+  # They are not part of any decision - the verdict uses `confidence` alone - so this only controls
+  # whether those stills are kept on disk for inspection instead of being discarded. Applies only
+  # while aws.enabled=true; the mock liveness service has no images to dump.
+  #
+  # NOTE: these are face biometrics the system does not otherwise retain anywhere. Set enabled to
+  # false to go back to discarding them.
+  liveness-image-dump:
+    enabled: true
+    base-dir: ./data/liveness-images
 
   # Only used while aws.enabled=false below (the MockFaceRecognitionService / MockLivenessService
   # default values). Can be overridden per-request via the optional mockSimilarity /
@@ -336,6 +368,20 @@ aws:
   enabled: true
   region: us-east-1
 
+  # How long a single AWS call may take before it fails instead of blocking the request.
+  #
+  # The SDK ships with NO api-call timeout at all - only a 30s socket timeout and three retries -
+  # so on a poor link one CompareFaces can occupy ~2 minutes. Registration issues five of them
+  # sequentially inside one synchronous HTTP request, so without these caps a bad connection
+  # presents to the operator as a registration that hangs forever with no error.
+  #
+  # Generous on purpose: these calls carry image payloads of a few hundred KB. Raise them for a
+  # site on a worse connection - the point is that the wait is bounded and reported, not short.
+  timeouts:
+    attempt-seconds: 25   # one HTTP attempt
+    call-seconds: 70      # hard ceiling across all attempts of one logical call
+    max-retries: 2
+
   # ---------------------------------------------------------------------------
   # CREDENTIALS ARE NOT SET HERE.
   #
@@ -348,9 +394,9 @@ aws:
   # and that commit reached the remote. Those credentials must be treated as disclosed and
   # rotated regardless of them having since expired.
   # ---------------------------------------------------------------------------
-  access-key: "ASIARQTU3F4GL7IE5SF5"
-  secret-key: "cge9Gu+kCzdOr25C42DSZ8NVB37dtqNaXwHkyAHj"
-  session-token: "IQoJb3JpZ2luX2VjEPz//////////wEaCXVzLWVhc3QtMSJGMEQCIBoEjJkObW+2+Zo4ebsfz+6wD3ZuOGCViBx8GokMmH+QAiBds9ZnGpi3koGioO8+Trs/2KhfxtAKhBQenJTBclLnsCrRAwjF//////////8BEAAaDDEwNDM5ODAwODA3NiIMqlbGiUafyirUxmN2KqUDuyoiF073EzmkzRy4f3u7JfjlOFxYswZifK/8RJsRkuMkJz3BIgvjIqzaZDrcq5DP3Huvh8THqracerWIAR4vH4Zwbg+T+RBbhtmnaWH47AxSny1a1R6SCCbhe/BMQyfZKE0I7rmx+1h/wB9c0/Qem5ffNGcTmzuXdCaCT1em8i/YggZKqJy5btAAtmJJ8UM3q6Iysd4vDVPelW60S+MLixogLEeFpHLV31IxakwkMgV718q+EYrz/vEIw3kaJhLvyYaRXYFuwyX8SRPD6EyWGWI8z7CAji6naPmdJbnHFh0NLyeP2wTAfm89/Qbc2TZyP2g3ArLYMGAw7yNc01GuCh6rvh776nX7ZeRIqMNbvZZEAv0oqe2180vBnbruYufc8Kd1OowoW4h9UvNq8lT02RE92joVh8h0QB/6nh7Z9N0+NgBXUA3Qux5Tcu7EeXPStl4sTpxSNNHov5h4yI3xyHnGDNZQ+Dv2E7rRfeXqNjwbA38KYbYaqFtWv19yK1cRHF+8lbgAmPzS2Q2jsYyr0Kd7K8XUbX8+PGWeF2xuRhLjCxCL9DDKuZjVBjqpAWll8kp5r+gLq0/3TEZqNcTC0CLqtMVjQ5aK64wa/c+M0DxrQLM5okrtkKSDhtZL28fg0jte8m6WZpy7BVuUpQ4h2+Ssh3lkIgln8mVjPvRcKMrdD8M/0teykFYVseIPPOL06ibuCEi6tpvVDUXSB6zl5JWCPqccLEvYxups5sC6FB1uxNXNcaw+j6x5oWZbMclzAceo6qRjQZXnPP/YOIzhH7X+7F6V0tc="
+  access-key: "ASIARQTU3F4GC6NU57LT"
+  secret-key: "CBdG9i79i1TAFfgMRnBPMZK7mEm1w3Ds+/1BZGx8"
+  session-token: "IQoJb3JpZ2luX2VjEPn//////////wEaCXVzLWVhc3QtMSJGMEQCIE6JH5k0qHWkfw+PPfq5vIsz69DaoPmXcLAODeJYfnCIAiBLpgD4+Lbd+iXJnTNj7Z8E5T1795gTMhhWhkjZtbZXQyrRAwjC//////////8BEAAaDDEwNDM5ODAwODA3NiIMtyIZR1MVPhI3LKaHKqUDogIl4d2v0dKV+ISRPWwncER1b2efGCyJrgucjleQ+gd6Lu+RyeApuchs/eSHYuDlWgIb4Izgt58Z2ARfdXZX3UuCLG6jb0cB1Efdw6wwhBAFAha4BF/XneS1Zah0w5prMY6yhw3o/Y/m21tX9zXEYkKJIOXR26p4eNdNY6FzNpdkgKQoiXzlzkPaxkHtdjIBAUK9Y58wEOY0o0HE4uQJGGgpy7ppI5aU3roCtLOSGu89t/x4ejK5DqDU3qDhHD351tZ1JVCfmbE4DRmj286Jjz6ducjGjhTQEJDIRv6flN3irWH9xMATA7csXBpabg26cdCp3bSPQQ/RJkC4COlyXzMu88hNwAZtkbYZcEozqYbsj0jOjb/e2kBkZv12zzkRfsH34YU5KRyX7vEY9tdFSSGas4qpK190ANkV9qgY7+3w64fiuGOqATCxcaA+FGC0SwzfhnxqBKB8KQF3iXWeXQ+jQdckmS1XYDCF9WfL3BigJTI9UUDijmbXCmgrvNnbslSnXPYgy6eDJdD+8XF2hf4iaXSpZyZkJiQXqV5ONYWpUgxpSzDNnYjWBjqpAVGCL/fdpQDKkrUCBTbEXhf7IBC77a4wIuWNkgZB6uAOsNWFSS7rWerykTmi791OUW/kNAoSHpp/xsDvsvZKsmgdtHXaf5KKwOzB1CKC0Cx0D6H29RfPkXMBD+7Uz6uo57p9OK9PfN0fdCDwZY95oAr8BrB6IOsFDY8olAS+uy1BHgbFYCg9ZL+3Up2+uEIjxuUUFahz3WX5UR38keutcCk1ntSPzvSh/SA="
 
   s3:
     # Bucket containing enrolled reference faces at FaceOnly/<nic>.jpg (see

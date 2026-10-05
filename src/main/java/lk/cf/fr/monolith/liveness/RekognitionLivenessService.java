@@ -20,11 +20,14 @@ import software.amazon.awssdk.services.rekognition.model.*;
 public class RekognitionLivenessService implements LivenessService {
 
     private final RekognitionClient rekognitionClient;
+    private final LivenessImageDumpService imageDumpService;
     private final double confidenceThreshold;
 
     public RekognitionLivenessService(RekognitionClient rekognitionClient,
+                                       LivenessImageDumpService imageDumpService,
                                        @Value("${verification.liveness-confidence-threshold:65}") double confidenceThreshold) {
         this.rekognitionClient = rekognitionClient;
+        this.imageDumpService = imageDumpService;
         this.confidenceThreshold = confidenceThreshold;
     }
 
@@ -47,6 +50,11 @@ public class RekognitionLivenessService implements LivenessService {
     public LivenessOutcome getResults(String sessionId, Boolean passedOverride) {
         GetFaceLivenessSessionResultsResponse response = rekognitionClient.getFaceLivenessSessionResults(
                 GetFaceLivenessSessionResultsRequest.builder().sessionId(sessionId).build());
+
+        // The response also carries the reference image and the audit images requested above.
+        // Nothing downstream consumes them, so they are written to disk here for inspection and
+        // then deliberately left out of LivenessOutcome - see LivenessImageDumpService.
+        imageDumpService.dump(sessionId, response);
 
         Float confidence = response.confidence();
         boolean passed = confidence != null && confidence > confidenceThreshold;

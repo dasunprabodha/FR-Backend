@@ -226,6 +226,16 @@ public class RegistrationAnalysisService {
                     scannedNicBytes.length, scannedNicForComparison.length);
         }
 
+        // One line stating exactly what is about to be pushed to AWS, and how much of it.
+        //
+        // The five comparisons below are sequential, synchronous and inside the operator's HTTP
+        // request, so their combined payload is the single best predictor of how long registration
+        // takes on a given link. Note which inputs are card crops (small) and which are full device
+        // captures (large): cmp3 compares two uncropped captures and is usually the heaviest call
+        // by a wide margin.
+        logComparisonPayloads(referenceId, nicForComparison, faceImage, selfNicForComparison,
+                selfImage, scannedNicForComparison);
+
         ComparisonResult cmp1 = faceRecognitionService.compareFacesInMemory(nicForComparison, faceImage, mockSimilarity);
         comparisonImageDumpService.dump(referenceId, "cmp1-deviceNicVsFace", nicForComparison, faceImage, cmp1);
 
@@ -360,13 +370,13 @@ public class RegistrationAnalysisService {
         if (liveness == null) {
             boolean passedSoFar = similarityPassed && !bindingBlocks && !channelBlocks;
             return new GateResult(similarityPassed, null,
-                    passedSoFar ? null : buildFailureReason(similarityPassed, true, bindingBlocks, binding),
+                    passedSoFar ? null : buildFailureReason(similarityPassed, true, bindingBlocks, channelBlocks, binding),
                     bindingPassed, bindingGated, channelBlocks, channelGated);
         }
 
         boolean allPassed = similarityPassed && liveness.passed() && !bindingBlocks && !channelBlocks;
         return new GateResult(similarityPassed, allPassed,
-                buildFailureReason(similarityPassed, liveness.passed(), bindingBlocks, binding),
+                buildFailureReason(similarityPassed, liveness.passed(), bindingBlocks, channelBlocks, binding),
                 bindingPassed, bindingGated, channelBlocks, channelGated);
     }
 
@@ -389,8 +399,9 @@ public class RegistrationAnalysisService {
 
     /** Null when everything passed, otherwise comma-joined reason codes. */
     private String buildFailureReason(boolean similarityPassed, boolean livenessPassed,
-                                      boolean bindingBlocks, IdentityBindingResult binding) {
-        if (similarityPassed && livenessPassed && !bindingBlocks) {
+                                      boolean bindingBlocks, boolean channelBlocks,
+                                      IdentityBindingResult binding) {
+        if (similarityPassed && livenessPassed && !bindingBlocks && !channelBlocks) {
             return null;
         }
         StringBuilder reason = new StringBuilder();
@@ -412,6 +423,14 @@ public class RegistrationAnalysisService {
             reason.append(binding == null || !binding.hasEvidence()
                     ? "BINDING_UNAVAILABLE" : "BINDING_MISMATCH");
         }
+        if (channelBlocks) {
+            if (reason.length() > 0) {
+                reason.append(",");
+            }
+            // Without this a cmp5 block was the one way to fail the gate with a null reason, which
+            // read downstream as "nothing failed".
+            reason.append("CHANNEL_MISMATCH");
+        }
         return reason.toString();
     }
 
@@ -420,6 +439,37 @@ public class RegistrationAnalysisService {
     // ---------------------------------------------------------------------------------------
 
     public record DocumentAnalysis(NicOcrResult ocr, IdentityBindingResult binding, long latencyMs) {
+    }
+
+    /**
+     * Reports the per-comparison upload sizes before any of them run, so a slow or timed-out
+     * registration can be read against what it was actually asked to transfer.
+     */
+    private void logComparisonPayloads(String referenceId, byte[] deviceNic, byte[] face,
+                                        byte[] selfNic, byte[] self, byte[] scannedNic) {
+        long cmp1 = size(deviceNic) + size(face);
+        long cmp2 = size(deviceNic) + size(selfNic);
+        long cmp3 = size(face) + size(self);
+        long cmp4 = scannedNic != null ? size(scannedNic) + size(face) : 0;
+        long cmp5 = scannedNic != null ? size(scannedNic) + size(deviceNic) : 0;
+        long total = cmp1 + cmp2 + cmp3 + cmp4 + cmp5;
+
+        log.info("[Analysis][Payloads] referenceId={} inputs: deviceNic={} face={} selfNic={} self={} scannedNic={}",
+                referenceId, human(size(deviceNic)), human(size(face)), human(size(selfNic)),
+                human(size(self)), scannedNic != null ? human(size(scannedNic)) : "none");
+        log.info("[Analysis][Payloads] referenceId={} uploads: cmp1={} cmp2={} cmp3={} cmp4={} cmp5={} | total={} across 5 sequential AWS calls",
+                referenceId, human(cmp1), human(cmp2), human(cmp3),
+                cmp4 > 0 ? human(cmp4) : "skipped", cmp5 > 0 ? human(cmp5) : "skipped", human(total));
+    }
+
+    private static long size(byte[] bytes) {
+        return bytes != null ? bytes.length : 0;
+    }
+
+    private static String human(long bytes) {
+        if (bytes < 1024) return bytes + "B";
+        if (bytes < 1024 * 1024) return Math.round(bytes / 1024.0) + "KB";
+        return String.format("%.2fMB", bytes / (1024.0 * 1024.0));
     }
 
     /**
